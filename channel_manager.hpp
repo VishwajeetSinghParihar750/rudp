@@ -34,9 +34,9 @@ class channel_manager
 
     static constexpr uint32_t MAX_CHANNELS = 2048;
 
-    std::unordered_map<channel_id, channel> channels;
+    std::unordered_map<channel_id, std::unique_ptr<channel>> channels;
 
-    std::unordered_map<client_id, std::unordered_map<channel_id, channel>> per_client_channels;
+    std::unordered_map<client_id, std::unordered_map<channel_id, std::unique_ptr<channel>>> per_client_channels;
 
     std::unordered_map<client_id, std::shared_ptr<i_sockaddr>> client_sockaddr;
 
@@ -105,7 +105,7 @@ class channel_manager
         assert(ch_it != channels.end());
         assert(cl_it != client_sockaddr.end());
 
-        std::unique_ptr<i_packet> pkt = ch_it->second.on_transport_send();
+        std::unique_ptr<i_packet> pkt = ch_it->second->on_transport_send();
 
         serialize_common_header(pkt->get_buffer() + rudp_protocol::COMMON_HEADER_OFFSET, pkt->get_capacity() - rudp_protocol::COMMON_HEADER_OFFSET, rudp_protocol::common_header(client_id_, channel_id_));
 
@@ -128,7 +128,7 @@ public:
             toret = distrib(gen);
             if (toret != invalid_channel_id && !channels.contains(toret))
             {
-                channels.emplace(toret, toret, type);
+                channels.emplace(toret, std::make_unique<channel>(toret, type));
                 return toret;
             }
         }
@@ -145,7 +145,7 @@ public:
         channel_id_ = ch_id;
 
         auto &cur_channel = per_client_channels[client_id_][channel_id_];
-        return cur_channel.read_bytes_to_application(buf, len);
+        return cur_channel->read_bytes_to_application(buf, len);
     }
 
     ssize_t read_from_channel_blocking(channel_id &channel_id_, client_id &client_id_, char *buf, const size_t len)
@@ -156,13 +156,13 @@ public:
         channel_id_ = ch_id;
 
         auto &cur_channel = per_client_channels[client_id_][channel_id_];
-        return cur_channel.read_bytes_to_application(buf, len);
+        return cur_channel->read_bytes_to_application(buf, len);
     }
 
     ssize_t write_to_channel(const channel_id &channel_id_, const client_id &client_id_, const char *buf, const size_t len)
     {
         auto &cur_channel = per_client_channels[client_id_][channel_id_];
-        return cur_channel.write_bytes_from_application(buf, len);
+        return cur_channel->write_bytes_from_application(buf, len);
     }
 
     ssize_t on_transport_receive(std::unique_ptr<i_packet> pkt, std::unique_ptr<i_sockaddr> source_addr)
@@ -184,7 +184,7 @@ public:
             {
                 if (*(addr_it->second) == *source_addr)
                 {
-                    per_client_channels[c_header.cl_id][c_header.ch_id].on_transport_receive(std::move(pkt));
+                    per_client_channels[c_header.cl_id][c_header.ch_id]->on_transport_receive(std::move(pkt));
                 }
                 // else client ID is coming from wrong source address, packet ignored.
             }

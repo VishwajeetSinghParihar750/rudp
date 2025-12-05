@@ -19,6 +19,11 @@ inline uint64_t get_random_channel_id()
     return uid(rng);
 }
 
+inline uint64_t get_random_uint64_t()
+{
+    return uid(rng);
+}
+
 using channel_id = uint64_t;
 using client_id = uint64_t;
 inline constexpr channel_id invalid_channel_id = 0;

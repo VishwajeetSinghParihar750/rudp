@@ -23,6 +23,39 @@ public:
         std::copy(buf, buf + n, mem);
     }
 
+    void resize_packet(size_t new_capacity, bool copy_data = true)
+    {
+        if (new_capacity == capacity)
+            return;
+
+        char *new_mem = nullptr;
+        if (new_capacity > 0)
+        {
+            new_mem = new char[new_capacity];
+
+            if (copy_data && capacity > 0)
+            {
+                size_t bytes_to_copy = std::min(length, new_capacity);
+                std::copy(mem, mem + bytes_to_copy, new_mem);
+                length = bytes_to_copy;
+            }
+            else
+            {
+                length = 0;
+            }
+        }
+        else
+        {
+            length = 0;
+        }
+
+        if (capacity > 0)
+            delete[] mem;
+
+        mem = new_mem;
+        capacity = new_capacity;
+    }
+
     char *get_buffer() override { return mem; }
     char *get_const_buffer() const override { return mem; }
     size_t get_capacity() const override { return capacity; }
