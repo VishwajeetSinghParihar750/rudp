@@ -184,7 +184,7 @@ public:
             {
                 if (*(addr_it->second) == *source_addr)
                 {
-                    per_client_channels[c_header.cl_id][c_header.ch_id]->on_transport_receive(std::move(pkt));
+                    per_client_channels[c_header.cl_id][c_header.ch_id]->on_transport_receive(pkt->get_buffer() + rudp_protocol::CHANNEL_HEADER_OFFSET, pkt->get_length() - rudp_protocol::CHANNEL_HEADER_OFFSET);
                 }
                 // else client ID is coming from wrong source address, packet ignored.
             }

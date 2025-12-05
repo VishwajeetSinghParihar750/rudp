@@ -26,7 +26,7 @@ public:
 
     //
     // recieve from client what came on udp
-    virtual void on_transport_receive(std::unique_ptr<i_packet> pkt) = 0;
+    virtual void on_transport_receive(const char *ibuf, const uint32_t &sz) = 0;
 
     virtual std::unique_ptr<i_packet> on_transport_send() = 0;
 
