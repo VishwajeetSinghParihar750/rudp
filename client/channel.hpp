@@ -12,10 +12,8 @@ protected:
     channel_id channel_id_;
     client_id client_id_;
 
-    channel_type channel_type_;
-
 public:
-    channel(channel_id id, channel_type type) : channel_id_(id), client_id_(invalid_client_id), channel_type_(type)
+    channel(channel_id id) : channel_id_(id), client_id_(INVALID_CLIENT_ID)
     {
     }
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <sys/types.h>
+#include <sys/socket.h>
 #include <unistd.h>
 #include <memory>
 #include <memory.h>
@@ -17,22 +18,27 @@
 #include "channel.hpp"
 #include "udp.hpp"
 #include "rudp_protocol.hpp"
+#include "channels/realible_ordered_channel/reliable_ordered_channel.hpp"
+#include "i_server.hpp"
+#include "i_udp_callback.hpp"
+#include "i_session_control_callback.hpp"
 #include "i_sockaddr.hpp"
 
-class channel_manager
+class channel_manager : public i_server, public i_udp_callback, public i_session_control_callback
 {
+    static constexpr uint32_t MAX_CHANNELS = 2048;
+
     /*
     here channels add their own id when they are ready to give app stuff,
     they will have ptr to thread_safe_unordered_set
     channel manager will take out stuff
     */
+
     std::shared_ptr<thread_safe_unordered_set<std::pair<client_id, channel_id>>> ready_list;
 
     std::shared_ptr<udp> udp_transport;
 
     std::set<timer_info> timers;
-
-    static constexpr uint32_t MAX_CHANNELS = 2048;
 
     std::unordered_map<channel_id, std::unique_ptr<channel>> channels;
 
@@ -44,6 +50,8 @@ class channel_manager
     {
         // ... logic to send retransmission packets, etc.
     }
+
+    std::jthread event_loop_thread;
 
     void event_loop(std::stop_token token)
     {
@@ -112,11 +120,20 @@ class channel_manager
         udp_transport->send_packet_to_network(*(cl_it->second), *pkt);
     }
 
+    std::shared_ptr<rudp_protocol::session_control> session_control_;
+    void handle_control_packet(const client_id &cl_id, std::unique_ptr<i_sockaddr> source_addr, const char *ibuf, const uint32_t &sz)
+    {
+        session_control_->handle_control_packet(cl_id, std::move(source_addr), ibuf, sz);
+    }
+
 public:
-    channel_id add_channel(channel_type type)
+    channel_manager() : event_loop_thread(std::jthread([this](std::stop_token token)
+                                                       { this->event_loop(std::move(token)); })) {}
+
+    channel_id add_channel(channel_type type) override
     {
         if (channels.size() >= MAX_CHANNELS)
-            return invalid_channel_id;
+            return INVALID_CHANNEL_ID;
 
         channel_id toret;
         std::random_device rd;
@@ -126,15 +143,24 @@ public:
         while (true)
         {
             toret = distrib(gen);
-            if (toret != invalid_channel_id && !channels.contains(toret))
+            if (toret != INVALID_CHANNEL_ID && !channels.contains(toret))
             {
-                channels.emplace(toret, std::make_unique<channel>(toret, type));
+                switch (type)
+                {
+                case channel_type::RELIABLE_ORDERED_CHANNEL:
+                    channels.emplace(toret, std::make_unique<reliable_ordered_channel>(toret));
+                    break;
+                default:
+                    toret = INVALID_CHANNEL_ID;
+                    break;
+                }
                 return toret;
             }
         }
     }
 
-    ssize_t read_from_channel_nonblocking(channel_id &channel_id_, client_id &client_id_, char *buf, const size_t len)
+    // for i_server
+    ssize_t read_from_channel_nonblocking(channel_id &channel_id_, client_id &client_id_, char *buf, const size_t len) override
     {
         auto result = ready_list->try_pop();
         if (!result.first)
@@ -148,7 +174,7 @@ public:
         return cur_channel->read_bytes_to_application(buf, len);
     }
 
-    ssize_t read_from_channel_blocking(channel_id &channel_id_, client_id &client_id_, char *buf, const size_t len)
+    ssize_t read_from_channel_blocking(channel_id &channel_id_, client_id &client_id_, char *buf, const size_t len) override
     {
         auto [cl_id, ch_id] = ready_list->pop();
 
@@ -159,37 +185,55 @@ public:
         return cur_channel->read_bytes_to_application(buf, len);
     }
 
-    ssize_t write_to_channel(const channel_id &channel_id_, const client_id &client_id_, const char *buf, const size_t len)
+    ssize_t write_to_channel(const channel_id &channel_id_, const client_id &client_id_, const char *buf, const size_t len) override
     {
         auto &cur_channel = per_client_channels[client_id_][channel_id_];
         return cur_channel->write_bytes_from_application(buf, len);
     }
 
-    ssize_t on_transport_receive(std::unique_ptr<i_packet> pkt, std::unique_ptr<i_sockaddr> source_addr)
+    // for i_trasnsport
+    void on_transport_receive(std::unique_ptr<i_packet> pkt, std::unique_ptr<i_sockaddr> source_addr) override
     {
         static rudp_protocol::common_header c_header;
 
         c_header = deserialize_common_header(pkt->get_buffer() + rudp_protocol::COMMON_HEADER_OFFSET, pkt->get_length() - rudp_protocol::COMMON_HEADER_OFFSET);
 
-        auto ch_it = channels.find(c_header.ch_id);
-
-        if (ch_it != channels.end())
+        if (c_header.ch_id == CONTROL_CHANNEL_ID)
+        {
+            handle_control_packet(c_header.cl_id, std::move(source_addr), pkt->get_buffer() + rudp_protocol::CHANNEL_HEADER_OFFSET, pkt->get_length() - rudp_protocol::CHANNEL_HEADER_OFFSET);
+        }
+        else if (channels.contains(c_header.ch_id))
         {
             auto addr_it = client_sockaddr.find(c_header.cl_id);
-            if (addr_it == client_sockaddr.end())
+            if (addr_it != client_sockaddr.end() && compare_sockaddrs_content(*addr_it->second, *source_addr))
             {
-                // maybe a new connection request
+                per_client_channels[c_header.cl_id][c_header.ch_id]->on_transport_receive(pkt->get_buffer() + rudp_protocol::CHANNEL_HEADER_OFFSET, pkt->get_length() - rudp_protocol::CHANNEL_HEADER_OFFSET);
             }
-            else
-            {
-                if (*(addr_it->second) == *source_addr)
-                {
-                    per_client_channels[c_header.cl_id][c_header.ch_id]->on_transport_receive(pkt->get_buffer() + rudp_protocol::CHANNEL_HEADER_OFFSET, pkt->get_length() - rudp_protocol::CHANNEL_HEADER_OFFSET);
-                }
-                // else client ID is coming from wrong source address, packet ignored.
-            }
+            // else client ID is coming from wrong source address, packet ignored.
         }
         // else channel does not exist, packet ignored.
-        return 0;
+    }
+
+    // for i session control
+    void add_client(const client_id &cl_id) override {}
+    void remove_client(const client_id &cl_id) override {}
+    void send_control_packet_via_transport(const i_sockaddr &dest_addr, const client_id &cl_id, std::unique_ptr<i_packet> pkt) override
+    {
+        serialize_common_header(pkt->get_buffer() + rudp_protocol::COMMON_HEADER_OFFSET, pkt->get_capacity() - rudp_protocol::COMMON_HEADER_OFFSET, rudp_protocol::common_header(cl_id, CONTROL_CHANNEL_ID));
+        udp_transport->send_packet_to_network(dest_addr, *pkt);
+    }
+
+    // for creator
+    void set_udp_transport(std::shared_ptr<udp> udp_)
+    {
+        udp_transport = udp_;
+    }
+    void set_session_control(std::shared_ptr<rudp_protocol::session_control> ses_control)
+    {
+        session_control_ = ses_control;
+    }
+    void start_server() override
+    {
+        udp_transport->start_io();
     }
 };

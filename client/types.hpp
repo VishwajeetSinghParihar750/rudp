@@ -1,0 +1,44 @@
+#pragma once
+
+#include <netdb.h>
+#include <sys/socket.h>
+#include <chrono>
+#include <inttypes.h>
+#include <random>
+#include <cstdint>
+
+enum class channel_type : uint16_t
+{
+    RELIABLE_ORDERED_CHANNEL = 0,
+    RELIABLE_UNORDERED_CHANNEL = 1,
+    UNRELIABLE_ORDERED_CHANNEL = 2,
+    UNRELIABLE_UNORDERED_CHANNEL = 3,
+};
+
+static std::mt19937_64 &get_rng()
+{
+    static const auto seed = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+    static std::mt19937_64 generator(static_cast<uint64_t>(seed));
+    return generator;
+}
+
+static std::uniform_int_distribution<uint64_t> &get_uid_distribution()
+{
+    static std::uniform_int_distribution<uint64_t> distribution(0ull, UINT64_MAX);
+    return distribution;
+}
+
+inline uint64_t get_random_channel_id()
+{
+    return get_uid_distribution()(get_rng());
+}
+
+inline uint64_t get_random_uint64_t()
+{
+    return get_uid_distribution()(get_rng());
+}
+
+using channel_id = uint64_t;
+using client_id = uint64_t;
+inline constexpr channel_id INVALID_CHANNEL_ID = 0;
+inline constexpr client_id INVALID_CLIENT_ID = 0;

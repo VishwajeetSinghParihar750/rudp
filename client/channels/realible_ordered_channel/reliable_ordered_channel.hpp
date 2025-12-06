@@ -11,7 +11,7 @@ class reliable_ordered_channel : public channel
     receive_window rcv_window;
 
 public:
-    reliable_ordered_channel(channel_id id, channel_type type) : channel(id, type) {}
+    reliable_ordered_channel(channel_id id) : channel(id) {}
 
     // Incoming Packet from Network
     void on_transport_receive(const char *ibuf, const uint32_t &sz) override
