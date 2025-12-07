@@ -13,13 +13,13 @@
 namespace rudp_protocol
 {
 
-    // offsets
+    // constants
 
     constexpr size_t COMMON_HEADER_SIZE = 10;
     constexpr size_t COMMON_HEADER_OFFSET = 0;
     constexpr size_t CHANNEL_HEADER_OFFSET = 10;
 
-    //
+    // helpers
 
     inline uint64_t htonll(uint64_t hostval)
     {
@@ -61,7 +61,6 @@ namespace rudp_protocol
             return *this;
         }
     };
-    // so common header is 96 bits i.e 12 bytes
 
     class session_control
     {
@@ -82,4 +81,170 @@ namespace rudp_protocol
             channel_manager_ = ch_manager;
         }
     };
+};
+
+enum class CONNECTION_STATE
+{
+    CLOSED,
+    LISTEN,
+    SYN_RCVD,
+    ESTABLISHED,
+    CLOSE_WAIT,
+    LAST_ACK,
+    FIN_WAIT1,
+    FIN_WAIT2,
+    CLOSING,
+    TIME_WAIT
+};
+
+enum class CONNECTION_PACKET_FLAGS : uint8_t
+{
+    SYN = 1,
+    ACK = (1 << 1),
+    RST = (1 << 2),
+    FIN = (1 << 3)
+};
+
+struct CONNECTION_STATE_MACHINE
+{
+    CONNECTION_STATE current_state = CONNECTION_STATE::LISTEN;
+
+    void send_syn_ack() {}
+    void send_ack() {}
+    void send_rst() {}
+    void send_fin() {}
+
+    void close()
+    {
+        if (current_state == CONNECTION_STATE::SYN_RCVD)
+        {
+            send_rst();
+            current_state = CONNECTION_STATE::CLOSED;
+        }
+        else if (current_state == CONNECTION_STATE::ESTABLISHED)
+        {
+            send_fin();
+            current_state = CONNECTION_STATE::FIN_WAIT1;
+        }
+        else if (current_state == CONNECTION_STATE::CLOSE_WAIT)
+        {
+            send_fin();
+            current_state = CONNECTION_STATE::LAST_ACK;
+        }
+        // else ignore
+    }
+
+    void handle_change(uint8_t rcvd_flags)
+    {
+        if (rcvd_flags & (uint8_t)CONNECTION_PACKET_FLAGS::RST)
+        {
+            if (current_state != CONNECTION_STATE::LISTEN && current_state != CONNECTION_STATE::CLOSED)
+            {
+                current_state = CONNECTION_STATE::CLOSED;
+                return;
+            }
+        }
+
+        switch (current_state)
+        {
+        case CONNECTION_STATE::LISTEN:
+        {
+
+            if (rcvd_flags == (uint8_t)CONNECTION_PACKET_FLAGS::SYN)
+            {
+                send_syn_ack();
+                current_state = CONNECTION_STATE::SYN_RCVD;
+            }
+            else
+                send_rst();
+
+            break;
+        }
+
+        case CONNECTION_STATE::SYN_RCVD:
+        {
+            if (rcvd_flags == (uint8_t)CONNECTION_PACKET_FLAGS::RST)
+            {
+                current_state = CONNECTION_STATE::CLOSED;
+            }
+            else if (rcvd_flags == (uint8_t)CONNECTION_PACKET_FLAGS::ACK)
+            {
+                current_state = CONNECTION_STATE::ESTABLISHED;
+            }
+            else
+                send_rst();
+            break;
+        }
+        case CONNECTION_STATE::ESTABLISHED:
+        {
+            if (rcvd_flags == (uint8_t)CONNECTION_PACKET_FLAGS::FIN)
+            {
+                send_ack();
+                current_state = CONNECTION_STATE::CLOSE_WAIT;
+            }
+            else
+                send_rst();
+
+            break;
+        }
+        case CONNECTION_STATE::LAST_ACK:
+        {
+            if (rcvd_flags == (uint8_t)CONNECTION_PACKET_FLAGS::ACK)
+            {
+                current_state = CONNECTION_STATE::CLOSED;
+            }
+            else
+                send_rst();
+
+            break;
+        }
+        case CONNECTION_STATE::FIN_WAIT1:
+        {
+            if (rcvd_flags == (uint8_t)CONNECTION_PACKET_FLAGS::ACK)
+            {
+                current_state = CONNECTION_STATE::FIN_WAIT2;
+            }
+            else if (rcvd_flags == (uint8_t)CONNECTION_PACKET_FLAGS::FIN)
+            {
+                send_ack();
+                current_state = CONNECTION_STATE::CLOSING;
+            }
+            else if (rcvd_flags == ((uint8_t)CONNECTION_PACKET_FLAGS::FIN | (uint8_t)CONNECTION_PACKET_FLAGS::ACK))
+            {
+                send_ack();
+                current_state = CONNECTION_STATE::TIME_WAIT;
+            }
+            else
+                send_rst();
+
+            break;
+        }
+        case CONNECTION_STATE::FIN_WAIT2:
+        {
+            if (rcvd_flags == (uint8_t)CONNECTION_PACKET_FLAGS::FIN)
+            {
+                send_ack();
+                current_state = CONNECTION_STATE::TIME_WAIT;
+            }
+            else
+                send_rst();
+
+            break;
+        }
+        case CONNECTION_STATE::CLOSING:
+        {
+            if (rcvd_flags == (uint8_t)CONNECTION_PACKET_FLAGS::ACK)
+            {
+                current_state = CONNECTION_STATE::TIME_WAIT;
+            }
+
+            else
+                send_rst();
+
+            break;
+        }
+        default:
+            break;
+        }
+    }
 };

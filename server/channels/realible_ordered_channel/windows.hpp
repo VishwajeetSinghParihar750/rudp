@@ -1,5 +1,6 @@
 #pragma once
 #include "sack_logic.hpp"
+#include "../../types.hpp"
 
 // ---------------------------------------------------------
 // RECEIVE WINDOW
