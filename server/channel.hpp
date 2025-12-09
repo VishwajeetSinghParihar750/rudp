@@ -17,6 +17,11 @@ struct send_block_info
     uint64_t length;
 };
 
+struct channel_setup_info
+{
+    channel_id ch_id;
+    std::unique_ptr<i_packet> payload;
+};
 class channel
 {
 protected:
@@ -51,4 +56,8 @@ public:
 
     // coming from application to send to network
     virtual ssize_t write_bytes_from_application(const char *buf, const size_t &len) = 0;
+
+    //
+    virtual channel_setup_info get_channel_setup_info() = 0;
+    virtual void process_channel_setup_info(channel_setup_info) = 0;
 };

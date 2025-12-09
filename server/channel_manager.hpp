@@ -190,7 +190,11 @@ class channel_manager : public i_server, public i_udp_callback, public i_session
     std::shared_ptr<rudp_protocol::session_control> session_control_;
     void handle_control_packet(const client_id &cl_id, std::unique_ptr<i_sockaddr> source_addr, const char *ibuf, const uint32_t &sz)
     {
-        session_control_->handle_control_packet(cl_id, std::move(source_addr), ibuf, sz);
+
+        if (client_sockaddr.contains(cl_id) && !compare_sockaddrs_content(*client_sockaddr[cl_id], *source_addr))
+            return; // not right
+
+        session_control_->handle_control_packet(cl_id, client_sockaddr.contains(cl_id), std::move(source_addr), ibuf, sz);
     }
 
     void handle_if_ready_to_send(const std::unique_ptr<channel> &cur_channel, const channel_id &ch_id, const client_id &cl_id)
@@ -299,7 +303,11 @@ public:
 
         c_header = deserialize_common_header(pkt->get_buffer() + rudp_protocol::COMMON_HEADER_OFFSET, pkt->get_length() - rudp_protocol::COMMON_HEADER_OFFSET);
 
-        if (per_client_channels.contains(c_header.cl_id))
+        if (c_header.ch_id == CONTROL_CHANNEL_ID)
+        {
+            handle_control_packet(c_header.cl_id, std::move(source_addr), pkt->get_buffer() + rudp_protocol::CHANNEL_HEADER_OFFSET, pkt->get_length() - rudp_protocol::CHANNEL_HEADER_OFFSET);
+        }
+        else if (per_client_channels.contains(c_header.cl_id))
         {
             auto addr_it = client_sockaddr.find(c_header.cl_id);
             if (addr_it != client_sockaddr.end() && compare_sockaddrs_content(*addr_it->second, *source_addr) && (per_client_channels[c_header.cl_id].contains(c_header.ch_id)))
@@ -311,20 +319,39 @@ public:
             }
             // else client ID is coming from wrong source address, packet ignored.
         }
-        else if (c_header.ch_id == CONTROL_CHANNEL_ID)
-        {
-            handle_control_packet(c_header.cl_id, std::move(source_addr), pkt->get_buffer() + rudp_protocol::CHANNEL_HEADER_OFFSET, pkt->get_length() - rudp_protocol::CHANNEL_HEADER_OFFSET);
-        }
         // else channel does not exist, packet ignored.
     }
 
     // for i session control
     void add_client(const client_id &cl_id) override {}
-    void remove_client(const client_id &cl_id) override {}
-    void send_control_packet_via_transport(const i_sockaddr &dest_addr, const client_id &cl_id, std::unique_ptr<i_packet> pkt) override
+    void add_channel_for_client(const client_id &cl_id, const channel_id &ch_id) override
     {
-        serialize_common_header(pkt->get_buffer() + rudp_protocol::COMMON_HEADER_OFFSET, pkt->get_capacity() - rudp_protocol::COMMON_HEADER_OFFSET, rudp_protocol::common_header(cl_id, CONTROL_CHANNEL_ID));
-        udp_transport->send_packet_to_network(dest_addr, *pkt);
+    }
+    void remove_channel_for_client(const client_id &cl_id, const channel_id &ch_id) override
+    {
+    }
+
+    void remove_client(const client_id &cl_id) override {
+        
+    }
+    void process_channel_setup_request(const client_id &cl_id, channel_setup_info ch_setup_info) override
+    {
+        assert(per_client_channels.contains(cl_id) && per_client_channels[cl_id].contains(ch_setup_info.ch_id));
+        per_client_channels[cl_id][ch_setup_info.ch_id]->process_channel_setup_info(std::move(ch_setup_info));
+    }
+    channel_setup_info get_channel_setup_info(const client_id &cl_id, const channel_id &ch_id) override
+    {
+        assert(per_client_channels.contains(cl_id) && per_client_channels[cl_id].contains(ch_id));
+        return per_client_channels[cl_id][ch_id]->get_channel_setup_info();
+    }
+
+    void send_control_packet_via_transport(const client_id &cl_id, std::unique_ptr<i_packet> pkt) override
+    {
+        if (client_sockaddr.contains(cl_id))
+        {
+            serialize_common_header(pkt->get_buffer() + rudp_protocol::COMMON_HEADER_OFFSET, pkt->get_capacity() - rudp_protocol::COMMON_HEADER_OFFSET, rudp_protocol::common_header(cl_id, CONTROL_CHANNEL_ID));
+            udp_transport->send_packet_to_network(*client_sockaddr[cl_id], *pkt);
+        }
     }
 
     // for creator
