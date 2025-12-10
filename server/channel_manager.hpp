@@ -15,7 +15,7 @@
 #include "types.hpp"
 #include "thread_safe_unordered_set.hpp"
 #include "timer_info.hpp"
-#include "channel.hpp"
+#include "i_channel.hpp"
 #include "udp.hpp"
 #include "rudp_protocol.hpp"
 #include "channels/realible_ordered_channel/reliable_ordered_channel.hpp"
@@ -76,8 +76,8 @@ class channel_manager : public i_server, public i_udp_callback, public i_session
     };
     thread_safe_priority_queue<timer_info_ptr, std::vector<timer_info_ptr>, timer_info_ptr_compare> timers;
 
-    std::unordered_map<channel_id, std::unique_ptr<channel>> channels;
-    std::unordered_map<client_id, std::unordered_map<channel_id, std::unique_ptr<channel>>> per_client_channels;
+    std::unordered_map<channel_id, std::unique_ptr<i_channel>> channels;
+    std::unordered_map<client_id, std::unordered_map<channel_id, std::unique_ptr<i_channel>>> per_client_channels;
     std::unordered_map<client_id, std::shared_ptr<i_sockaddr>> client_sockaddr;
 
     //  ⚠️⚠️⚠️ these other containers need to be made therad safe too
@@ -197,7 +197,7 @@ class channel_manager : public i_server, public i_udp_callback, public i_session
         session_control_->handle_control_packet(cl_id, client_sockaddr.contains(cl_id), std::move(source_addr), ibuf, sz);
     }
 
-    void handle_if_ready_to_send(const std::unique_ptr<channel> &cur_channel, const channel_id &ch_id, const client_id &cl_id)
+    void handle_if_ready_to_send(const std::unique_ptr<i_channel> &cur_channel, const channel_id &ch_id, const client_id &cl_id)
     {
         send_block_info cur_read_block = cur_channel->get_next_send_block_info();
 
@@ -210,7 +210,7 @@ class channel_manager : public i_server, public i_udp_callback, public i_session
             ready_to_send_queue->push(cur_ready_list_info);
         }
     }
-    void handle_if_ready_to_rcv(const std::unique_ptr<channel> &cur_channel, const channel_id &ch_id, const client_id &cl_id)
+    void handle_if_ready_to_rcv(const std::unique_ptr<i_channel> &cur_channel, const channel_id &ch_id, const client_id &cl_id)
     {
         rcv_block_info cur_read_block = cur_channel->get_next_rcv_block_info();
 
@@ -323,17 +323,24 @@ public:
     }
 
     // for i session control
-    void add_client(const client_id &cl_id) override {}
+    void add_client(const client_id &cl_id, const i_sockaddr &sock_addr) override
+    {
+        client_sockaddr[cl_id] = std::make_shared<i_sockaddr>(sock_addr);
+    }
     void add_channel_for_client(const client_id &cl_id, const channel_id &ch_id) override
     {
+        per_client_channels[cl_id][ch_id] = channels[ch_id]->clone();
     }
     void remove_channel_for_client(const client_id &cl_id, const channel_id &ch_id) override
     {
+        per_client_channels[cl_id].erase(ch_id);
+    }
+    void remove_client(const client_id &cl_id) override
+    {
+        per_client_channels.erase(cl_id);
+        client_sockaddr.erase(cl_id);
     }
 
-    void remove_client(const client_id &cl_id) override {
-        
-    }
     void process_channel_setup_request(const client_id &cl_id, channel_setup_info ch_setup_info) override
     {
         assert(per_client_channels.contains(cl_id) && per_client_channels[cl_id].contains(ch_setup_info.ch_id));

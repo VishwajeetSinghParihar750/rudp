@@ -2,16 +2,37 @@
 #pragma once
 
 #include "windows.hpp"
-#include "../../channel.hpp"
+#include "../../i_channel.hpp"
 #include "../../raw_packet.hpp"
 
-class reliable_ordered_channel : public channel
+class reliable_ordered_channel : public i_channel
 {
     send_window snd_window;
     receive_window rcv_window;
 
+    client_id cl_id;
+    channel_id ch_id;
+
 public:
-    reliable_ordered_channel(channel_id id) : channel(id) {}
+    reliable_ordered_channel() : cl_id(INVALID_CLIENT_ID), ch_id(INVALID_CHANNEL_ID) {}
+    reliable_ordered_channel(channel_id ch_id_) : cl_id(INVALID_CLIENT_ID), ch_id(ch_id_) {}
+    reliable_ordered_channel(client_id cl_id_, channel_id ch_id_) : cl_id(cl_id_), ch_id(ch_id_) {}
+
+    void set_client_id(client_id cl_id_) { cl_id = cl_id_; }
+    client_id get_client_id() { return cl_id; }
+    void set_channel_id(channel_id ch_id_) { ch_id = ch_id_; }
+    channel_id get_channel_id() { return ch_id; }
+    std::unique_ptr<i_channel> clone() const { return std::make_unique<reliable_ordered_channel>(*this); }
+
+    //
+    channel_setup_info get_channel_setup_info() {}
+    void process_channel_setup_info(channel_setup_info) {}
+
+    rcv_block_info get_next_rcv_block_info() {} // this moved the to read block ahead
+    send_block_info get_next_send_block_info() {}
+
+    ssize_t read_rcv_block(rcv_block_info, char *buf, const uint32_t &len) {}
+    std::unique_ptr<i_packet> read_send_block(send_block_info) {}
 
     // Incoming Packet from Network
     void on_transport_receive(const char *ibuf, const uint32_t &sz) override

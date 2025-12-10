@@ -22,22 +22,15 @@ struct channel_setup_info
     channel_id ch_id;
     std::unique_ptr<i_packet> payload;
 };
-class channel
+class i_channel
 {
-protected:
-    channel_id channel_id_;
-    client_id client_id_;
 
 public:
-    channel(channel_id id) : channel_id_(id), client_id_(INVALID_CLIENT_ID)
-    {
-    }
-
-    void set_client_id(client_id cl_id)
-    {
-        client_id_ = cl_id;
-    }
-
+    virtual void set_client_id(client_id cl_id) = 0;
+    virtual client_id get_client_id() = 0;
+    virtual void set_channel_id(channel_id) = 0;
+    virtual channel_id get_channel_id() = 0;
+    virtual std::unique_ptr<i_channel> clone() const = 0;
     //
 
     virtual rcv_block_info get_next_rcv_block_info() = 0; // this moved the to read block ahead
