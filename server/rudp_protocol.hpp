@@ -78,7 +78,7 @@ namespace rudp_protocol
     class session_control
     {
         std::weak_ptr<i_session_control_callback> data_channel_manager;
-        std::unordered_map<client_id, std::unique_ptr<reliable_ordered_channel>> clients_control_channels;
+        std::unordered_map<client_id, connection_state_machine> clients_state_machine;
 
         static void serialize_control_header(char *buf, const size_t &len, const control_header &ss_header)
         {
@@ -112,7 +112,7 @@ namespace rudp_protocol
             while (true)
             {
                 client_id cl_id = get_random_client_id();
-                if (cl_id != INVALID_CLIENT_ID && !clients_control_channels.contains(cl_id))
+                if (cl_id != INVALID_CLIENT_ID && !clients_state_machine.contains(cl_id))
                     return cl_id;
             }
         }
@@ -186,14 +186,39 @@ namespace rudp_protocol
 
         void add_client(const client_id &cl_id)
         {
-            clients_control_channels.emplace(cl_id);
+            clients_state_machine.emplace(cl_id);
         }
         void remove_client(const client_id &cl_id)
         {
-            clients_control_channels.erase(cl_id);
+            clients_state_machine.erase(cl_id);
+        }
+
+        std::jthread input_loop_thread;
+        void input_event_loop(std::stop_token token)
+        {
+            std::unique_ptr<raw_packet> ibuf = std::make_unique<raw_packet>(1500);
+
+            channel_id ch_id;
+            client_id cl_id;
+
+            while (!token.stop_requested())
+            {
+                auto sp = data_channel_manager.lock();
+                if (sp == nullptr)
+                    return;
+
+                ssize_t len = sp->read_from_control_channel_blocking(ch_id, cl_id, ibuf->get_buffer(), ibuf->get_capacity());
+                if (len > 0)
+                {
+                    ibuf->set_length(len);
+                    handle_control_packet(cl_id, true, nullptr, ibuf->get_buffer(), ibuf->get_length());
+                }
+            }
         }
 
     public:
+        // Within rudp_protocol::session_control class
+
         void handle_control_packet(const client_id &cl_id, bool is_active_connection, std::unique_ptr<i_sockaddr> source_addr, const char *ibuf, const uint32_t &sz)
         {
             if (sz < CONTROL_HEADER_SIZE)
@@ -203,118 +228,162 @@ namespace rudp_protocol
             const char *payload_ptr = ibuf + CONTROL_HEADER_SIZE;
             uint32_t payload_len = sz - CONTROL_HEADER_SIZE;
 
-            // --- Scenario: New Connection Request ---
-            if (cl_id == INVALID_CLIENT_ID && !is_active_connection)
+            client_id target_cl_id = cl_id;
+            connection_state_machine *fsm = nullptr;
+
+            if (target_cl_id == INVALID_CLIENT_ID && !is_active_connection)
             {
-                // 1. Checksum Verification
-                if (cur_header.flags & (uint8_t)CONTROL_PACKET_HEADER_FLAGS::SUM)
+                if (!(cur_header.flags & (uint8_t)CONTROL_PACKET_HEADER_FLAGS::SYN))
                 {
-                    uint8_t checksum = calculate_checksum(ibuf, sz);
-                    if (checksum != (~(uint8_t(0))))
-                        return;
-
-                    cur_header.flags &= ~(uint8_t)CONTROL_PACKET_HEADER_FLAGS::SUM;
+                    return;
                 }
 
-                if (cur_header.flags == ((uint8_t)CONTROL_PACKET_HEADER_FLAGS::SYN | (uint8_t)CONTROL_PACKET_HEADER_FLAGS::CHN))
-                {
-                    auto manager = data_channel_manager.lock();
-                    if (!manager)
-                        return;
+                auto manager = data_channel_manager.lock();
+                if (!manager)
+                    return;
 
-                    client_id new_cl_id = get_new_client_id();
-                    add_client(new_cl_id);
-                    manager->add_client(new_cl_id);
+                target_cl_id = get_new_client_id();
+                add_client(target_cl_id);
+                manager->add_client(target_cl_id, *source_addr);
 
-                    // ⚠️ need to add more checks to enforce this
-                    std::vector<channel_setup_info> channel_setup_info_ = deserialize_channel_setup_info(ibuf + CONTROL_HEADER_SIZE, sz - CONTROL_HEADER_SIZE);
-
-                    if (channel_setup_info_.empty() || channel_setup_info_[0].ch_id != CONTROL_CHANNEL_ID)
-                        return; // it must have control channel setup info as first thing
-
-                    std::unique_ptr<raw_packet> ack_pkt = std::make_unique<raw_packet>(1500);
-                    uint32_t ack_payload_offset = COMMON_HEADER_SIZE + CONTROL_HEADER_SIZE + sizeof(uint16_t);
-                    uint16_t channel_cnt = 0;
-
-                    for (auto &i : channel_setup_info_)
-                    {
-                        channel_id ch_id = i.ch_id;
-                        channel_setup_info res_setup_info;
-
-                        if (ch_id == CONTROL_CHANNEL_ID)
-                        {
-                            clients_control_channels[new_cl_id]->process_channel_setup_info(std::move(i));
-                            res_setup_info = clients_control_channels[new_cl_id]->get_channel_setup_info();
-                        }
-                        else
-                        {
-                            manager->add_channel_for_client(new_cl_id, ch_id);
-                            manager->process_channel_setup_request(new_cl_id, std::move(i)); //  ℹ️ need error handling here
-                            res_setup_info = manager->get_channel_setup_info(new_cl_id, ch_id);
-                        }
-
-                        uint32_t size_left = 1500 - ack_payload_offset;
-                        uint32_t size_needed = res_setup_info.payload->get_length() + sizeof(channel_id) + sizeof(uint16_t);
-
-                        if (size_needed > size_left)
-                        {
-                            manager->remove_channel_for_client(new_cl_id, ch_id);
-
-                            if (ch_id == CONTROL_CHANNEL_ID)
-                            {
-                                manager->remove_client(new_cl_id);
-                                remove_client(new_cl_id);
-
-                                return;
-                            }
-                        }
-                        else
-                        {
-                            serialize_channel_setup_info(ch_id, res_setup_info.payload->get_buffer(), ack_pkt->get_buffer() + ack_payload_offset, ack_pkt->get_length());
-                            ack_payload_offset += size_needed;
-                            channel_cnt++;
-                        }
-                        // ℹ️  improvement :  coudl simply ask for size of setup info before hand beore adding channel
-                    }
-
-                    ack_pkt->set_length(ack_payload_offset);
-
-                    //
-                    uint32_t CHANNEL_CNT_OFFSET = CONTROL_HEADER_SIZE + COMMON_HEADER_SIZE;
-                    uint16_t n_channel_cnt = htons(channel_cnt);
-                    memcpy(ack_pkt->get_buffer() + CHANNEL_CNT_OFFSET, &n_channel_cnt, sizeof(uint16_t));
-
-                    //
-
-                    control_header ack_header;
-                    ack_header.flags = (uint8_t)CONTROL_PACKET_HEADER_FLAGS::SYN |
-                                       (uint8_t)CONTROL_PACKET_HEADER_FLAGS::ACK |
-                                       (uint8_t)CONTROL_PACKET_HEADER_FLAGS::CHN |
-                                       (uint8_t)CONTROL_PACKET_HEADER_FLAGS::SUM;
-                    ack_header.reserved = 0;
-
-                    serialize_control_header(ack_pkt->get_buffer() + COMMON_HEADER_SIZE, CONTROL_HEADER_SIZE, ack_header);
-
-                    ack_header.reserved += calculate_checksum(ack_pkt->get_buffer(), ack_pkt->get_length()); // Payload part
-
-                    serialize_control_header(ack_pkt->get_buffer() + COMMON_HEADER_SIZE, CONTROL_HEADER_SIZE, ack_header);
-
-                    manager->send_control_packet_via_transport(new_cl_id, std::move(ack_pkt));
-                }
+                fsm = &clients_state_machine.at(target_cl_id);
+            }
+            else if (is_active_connection && clients_state_machine.contains(target_cl_id))
+            {
+                fsm = &clients_state_machine.at(target_cl_id);
             }
             else
             {
-                if (!is_active_connection)
+                return;
+            }
+
+            uint8_t final_flags = 0;
+            if (cur_header.flags & (uint8_t)CONTROL_PACKET_HEADER_FLAGS::SUM)
+            {
+                uint8_t actual_checksum = calculate_checksum(ibuf, sz);
+                if (actual_checksum != (~(uint8_t(0))))
+                {
+                    return;
+                }
+                final_flags |= (uint8_t)CONTROL_PACKET_HEADER_FLAGS::SUM;
+            }
+
+            //
+            uint8_t fsm_flags_mask = (uint8_t)CONTROL_PACKET_HEADER_FLAGS::SYN |
+                                     (uint8_t)CONTROL_PACKET_HEADER_FLAGS::ACK |
+                                     (uint8_t)CONTROL_PACKET_HEADER_FLAGS::RST |
+                                     (uint8_t)CONTROL_PACKET_HEADER_FLAGS::FIN;
+
+            uint8_t rcvd_fsm_flags = cur_header.flags & fsm_flags_mask;
+
+            connection_state_machine::fsm_result result = fsm->handle_change(rcvd_fsm_flags);
+
+            if (result.close_connection)
+            {
+                auto manager = data_channel_manager.lock();
+                if (manager)
+                {
+                    manager->remove_client(target_cl_id);
+                }
+                remove_client(target_cl_id);
+                return; // Connection closed, no response needed.
+            }
+
+            final_flags |= result.response_flags;
+            if (cur_header.flags & (uint8_t)CONTROL_PACKET_HEADER_FLAGS::CHN)
+                final_flags |= uint8_t(CONTROL_PACKET_HEADER_FLAGS::CHN);
+
+            if (final_flags == 0)
+                return; // nothing to send back
+
+            //
+            std::unique_ptr<raw_packet> res_pkt = std::make_unique<raw_packet>(1500);
+
+            if (cur_header.flags & (uint8_t)CONTROL_PACKET_HEADER_FLAGS::CHN)
+            {
+                uint32_t current_offset = COMMON_HEADER_SIZE + CONTROL_HEADER_SIZE;
+
+                auto manager = data_channel_manager.lock();
+                if (!manager)
                     return;
 
-                // Handle Established Control Packets (ACK, FIN, RST, KeepAlive)
-                // ...
+                std::vector<channel_setup_info> received_setup_info = deserialize_channel_setup_info(payload_ptr, payload_len);
+
+                uint32_t channel_data_offset = current_offset + sizeof(uint16_t);
+                uint16_t channel_cnt = 0;
+
+                for (auto &i : received_setup_info)
+                {
+
+                    channel_id ch_id = i.ch_id;
+                    channel_setup_info res_setup_info;
+
+                    manager->add_channel_for_client(target_cl_id, ch_id);
+                    manager->process_channel_setup_request(target_cl_id, std::move(i));
+                    res_setup_info = manager->get_channel_setup_info(target_cl_id, ch_id);
+
+                    uint32_t size_needed = res_setup_info.payload->get_length() + sizeof(channel_id) + sizeof(uint16_t);
+                    uint32_t size_left = 1500 - channel_data_offset;
+
+                    if (size_needed > size_left)
+                    {
+                        manager->remove_channel_for_client(target_cl_id, ch_id);
+
+                        if (ch_id == CONTROL_CHANNEL_ID)
+                        {
+                            manager->remove_client(target_cl_id);
+                            remove_client(target_cl_id);
+                            return;
+                        }
+                    }
+                    else
+                    {
+                        serialize_channel_setup_info(ch_id, res_setup_info.payload->get_buffer(), res_pkt->get_buffer() + channel_data_offset, res_setup_info.payload->get_length());
+                        channel_data_offset += size_needed;
+                        channel_cnt++;
+                    }
+                }
+
+                uint16_t n_channel_cnt = htons(channel_cnt);
+                memcpy(res_pkt->get_buffer() + current_offset, &n_channel_cnt, sizeof(uint16_t));
+
+                current_offset = channel_data_offset;
+
+                res_pkt->set_length(current_offset);
+            }
+
+            control_header res_header;
+            res_header.flags = final_flags;
+
+            serialize_control_header(res_pkt->get_buffer() + COMMON_HEADER_SIZE, CONTROL_HEADER_SIZE, res_header);
+
+            if (final_flags & (uint8_t)CONTROL_PACKET_HEADER_FLAGS::SUM)
+            {
+                uint8_t final_checksum = calculate_checksum(res_pkt->get_buffer(), res_pkt->get_length());
+                res_header.reserved = (uint8_t)(~(final_checksum));
+                serialize_control_header(res_pkt->get_buffer() + COMMON_HEADER_SIZE, CONTROL_HEADER_SIZE, res_header);
+            }
+
+            auto manager = data_channel_manager.lock();
+            if (manager)
+            {
+                if (is_active_connection)
+                    manager->write_to_channel(CONTROL_CHANNEL_ID, target_cl_id, res_pkt->get_buffer(), res_pkt->get_length());
+                else
+                    manager->send_control_packet_via_transport(target_cl_id, std::move(res_pkt));
             }
         }
 
-        void set_channel_manager(std::weak_ptr<i_session_control_callback> ch_manager)
+        void setup_control_session(std::weak_ptr<i_session_control_callback> ch_manager)
         {
             data_channel_manager = ch_manager;
+            auto sp = data_channel_manager.lock();
+            assert(sp != nullptr);
+
+            sp->add_control_channel(channel_type::RELIABLE_ORDERED_CHANNEL);
+
+            input_loop_thread = std::jthread([&](std::stop_token stoken)
+                                             { input_event_loop(std::move(stoken)); });
         }
     };
 };
@@ -343,146 +412,152 @@ enum class CONTROL_PACKET_HEADER_FLAGS : uint8_t
     CHN = (1 << 5)  // has channels info
 };
 
-struct CONNECTION_STATE_MACHINE
+struct connection_state_machine
 {
     CONNECTION_STATE current_state = CONNECTION_STATE::LISTEN;
 
-    void send_syn_ack() {}
-    void send_ack() {}
-    void send_rst() {}
-    void send_fin() {}
+    struct fsm_result
+    {
+        uint8_t response_flags = 0;
+        bool close_connection = false;
+    };
 
-    void close()
+    uint8_t get_ack_flag() const
+    {
+        return (uint8_t)CONTROL_PACKET_HEADER_FLAGS ::ACK;
+    }
+
+    uint8_t get_rst_flag() const
+    {
+        return (uint8_t)CONTROL_PACKET_HEADER_FLAGS::RST;
+    }
+
+    uint8_t get_fin_flag() const
+    {
+        return (uint8_t)CONTROL_PACKET_HEADER_FLAGS::FIN;
+    }
+
+    fsm_result close()
     {
         if (current_state == CONNECTION_STATE::SYN_RCVD)
         {
-            send_rst();
             current_state = CONNECTION_STATE::CLOSED;
+            return {get_rst_flag(), true};
         }
         else if (current_state == CONNECTION_STATE::ESTABLISHED)
         {
-            send_fin();
             current_state = CONNECTION_STATE::FIN_WAIT1;
+            return {get_fin_flag(), false};
         }
         else if (current_state == CONNECTION_STATE::CLOSE_WAIT)
         {
-            send_fin();
             current_state = CONNECTION_STATE::LAST_ACK;
+            return {get_fin_flag(), false};
         }
-        // else ignore
+        return {0, false};
     }
 
-    void handle_change(uint8_t rcvd_flags)
+    fsm_result handle_change(uint8_t rcvd_flags)
     {
-        if (rcvd_flags & (uint8_t)CONTROL_PACKET_HEADER_FLAGS::RST)
+        if (rcvd_flags & get_rst_flag())
         {
             if (current_state != CONNECTION_STATE::LISTEN && current_state != CONNECTION_STATE::CLOSED)
             {
                 current_state = CONNECTION_STATE::CLOSED;
-                return;
+                return {0, true};
             }
+            return {0, false};
         }
 
         switch (current_state)
         {
         case CONNECTION_STATE::LISTEN:
         {
-
             if (rcvd_flags == (uint8_t)CONTROL_PACKET_HEADER_FLAGS::SYN)
             {
-                send_syn_ack();
                 current_state = CONNECTION_STATE::SYN_RCVD;
+                return {(uint8_t)CONTROL_PACKET_HEADER_FLAGS::SYN | get_ack_flag(), false};
             }
             else
-                send_rst();
-
-            break;
+            {
+                return {get_rst_flag(), false};
+            }
         }
 
         case CONNECTION_STATE::SYN_RCVD:
         {
-            if (rcvd_flags == (uint8_t)CONTROL_PACKET_HEADER_FLAGS::RST)
+            if (rcvd_flags & get_rst_flag())
             {
                 current_state = CONNECTION_STATE::CLOSED;
+                return {0, true};
             }
-            else if (rcvd_flags == (uint8_t)CONTROL_PACKET_HEADER_FLAGS::ACK)
+            else if (rcvd_flags == get_ack_flag())
             {
                 current_state = CONNECTION_STATE::ESTABLISHED;
+                return {0, false};
             }
             else
-                send_rst();
-            break;
+            {
+                return {get_rst_flag(), false};
+            }
         }
         case CONNECTION_STATE::ESTABLISHED:
         {
-            if (rcvd_flags == (uint8_t)CONTROL_PACKET_HEADER_FLAGS::FIN)
+            if (rcvd_flags == get_fin_flag())
             {
-                send_ack();
                 current_state = CONNECTION_STATE::CLOSE_WAIT;
+                return {get_ack_flag(), false};
             }
-            else
-                send_rst();
-
-            break;
+            return {0, false};
         }
         case CONNECTION_STATE::LAST_ACK:
         {
-            if (rcvd_flags == (uint8_t)CONTROL_PACKET_HEADER_FLAGS::ACK)
+            if (rcvd_flags == get_ack_flag())
             {
                 current_state = CONNECTION_STATE::CLOSED;
+                return {0, true};
             }
-            else
-                send_rst();
-
-            break;
+            return {0, false};
         }
         case CONNECTION_STATE::FIN_WAIT1:
         {
-            if (rcvd_flags == (uint8_t)CONTROL_PACKET_HEADER_FLAGS::ACK)
+            if (rcvd_flags == get_ack_flag())
             {
                 current_state = CONNECTION_STATE::FIN_WAIT2;
+                return {0, false};
             }
-            else if (rcvd_flags == (uint8_t)CONTROL_PACKET_HEADER_FLAGS::FIN)
+            else if (rcvd_flags == get_fin_flag())
             {
-                send_ack();
                 current_state = CONNECTION_STATE::CLOSING;
+                return {get_ack_flag(), false};
             }
-            else if (rcvd_flags == ((uint8_t)CONTROL_PACKET_HEADER_FLAGS::FIN | (uint8_t)CONTROL_PACKET_HEADER_FLAGS::ACK))
+            else if (rcvd_flags == (get_fin_flag() | get_ack_flag()))
             {
-                send_ack();
                 current_state = CONNECTION_STATE::TIME_WAIT;
+                return {get_ack_flag(), false};
             }
-            else
-                send_rst();
-
-            break;
+            return {0, false};
         }
         case CONNECTION_STATE::FIN_WAIT2:
         {
-            if (rcvd_flags == (uint8_t)CONTROL_PACKET_HEADER_FLAGS::FIN)
+            if (rcvd_flags == get_fin_flag())
             {
-                send_ack();
                 current_state = CONNECTION_STATE::TIME_WAIT;
+                return {get_ack_flag(), false};
             }
-            else
-                send_rst();
-
-            break;
+            return {0, false};
         }
         case CONNECTION_STATE::CLOSING:
         {
-            if (rcvd_flags == (uint8_t)CONTROL_PACKET_HEADER_FLAGS::ACK)
+            if (rcvd_flags == get_ack_flag())
             {
                 current_state = CONNECTION_STATE::TIME_WAIT;
+                return {0, false};
             }
-
-            else
-                send_rst();
-
-            break;
+            return {0, false};
         }
         default:
-            break;
+            return {0, false};
         }
     }
 };

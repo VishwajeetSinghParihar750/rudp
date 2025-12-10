@@ -14,7 +14,6 @@ class reliable_ordered_channel : public i_channel
     channel_id ch_id;
 
 public:
-    reliable_ordered_channel() : cl_id(INVALID_CLIENT_ID), ch_id(INVALID_CHANNEL_ID) {}
     reliable_ordered_channel(channel_id ch_id_) : cl_id(INVALID_CLIENT_ID), ch_id(ch_id_) {}
     reliable_ordered_channel(client_id cl_id_, channel_id ch_id_) : cl_id(cl_id_), ch_id(ch_id_) {}
 
