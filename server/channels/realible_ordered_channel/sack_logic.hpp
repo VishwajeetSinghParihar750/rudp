@@ -25,7 +25,7 @@ struct rudp_header
     uint32_t seq_no;
     uint32_t ack_no;
     uint16_t win_sz;
-    uint16_t flags;
+    uint16_t flags; // ack = this has an ack,  is_last = this is the last segment  ...
     uint16_t checksum;
 };
 
@@ -36,6 +36,7 @@ public:
     using sequence_number = uint32_t;
     std::map<sequence_number, sequence_number> sack_blocks;
 
+    bool should_send_ack = false;
     // Returns true if SACK state was updated
     void incoming_segment(sequence_number start_seq, sequence_number end_seq, sequence_number &rcv_nxt)
     {
@@ -43,6 +44,8 @@ public:
             start_seq = rcv_nxt;
         if (start_seq >= end_seq)
             return;
+
+        //
 
         sequence_number new_start = start_seq;
         sequence_number new_end = end_seq;

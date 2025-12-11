@@ -2,6 +2,12 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstring>
+#include <memory>
+#include <vector>
+#include <cassert>
+#include <thread>
+#include <arpa/inet.h>
 
 #include "raw_packet.hpp"
 #include "types.hpp"
@@ -63,40 +69,54 @@ namespace rudp_protocol
         }
     };
 
-    constexpr size_t CONTROL_HEADER_SIZE = 2;
+    constexpr size_t CONTROL_HEADER_SIZE = 4;
 
     struct control_header
     {
+        uint16_t total_len;
         uint8_t flags;
         // syn, ack, fin, rst, sum = reserved bits are checksum , cnl = has channel info in payload
         uint8_t reserved;
 
         control_header() = default;
-        control_header(uint8_t f) : flags(f), reserved(0) {}
+        control_header(uint8_t f) : total_len(CONTROL_HEADER_SIZE), flags(f), reserved(0) {}
     };
 
     class session_control
     {
         std::weak_ptr<i_session_control_callback> data_channel_manager;
         std::unordered_map<client_id, connection_state_machine> clients_state_machine;
+        std::unordered_map<client_id, std::deque<char>> client_stream_buffers;
 
         static void serialize_control_header(char *buf, const size_t &len, const control_header &ss_header)
         {
             assert(len >= CONTROL_HEADER_SIZE);
 
-            memcpy(buf, &ss_header.flags, sizeof(uint8_t));
-            memcpy(buf + sizeof(uint8_t), &ss_header.reserved, sizeof(uint8_t));
+            // Serialize Total Length
+            uint16_t n_len = htons(ss_header.total_len);
+            memcpy(buf, &n_len, sizeof(uint16_t));
+
+            // Serialize Flags and Reserved
+            memcpy(buf + sizeof(uint16_t), &ss_header.flags, sizeof(uint8_t));
+            memcpy(buf + sizeof(uint16_t) + sizeof(uint8_t), &ss_header.reserved, sizeof(uint8_t));
         }
+
         static control_header deserialize_control_header(const char *buf, const uint32_t &len)
         {
             assert(len >= CONTROL_HEADER_SIZE);
             control_header ss_header;
 
-            memcpy(&ss_header.flags, buf, sizeof(uint8_t));
-            memcpy(&ss_header.reserved, buf + sizeof(uint8_t), sizeof(uint8_t));
+            // Deserialize Total Length
+            memcpy(&ss_header.total_len, buf, sizeof(uint16_t));
+            ss_header.total_len = ntohs(ss_header.total_len);
+
+            // Deserialize Flags and Reserved
+            memcpy(&ss_header.flags, buf + sizeof(uint16_t), sizeof(uint8_t));
+            memcpy(&ss_header.reserved, buf + sizeof(uint16_t) + sizeof(uint8_t), sizeof(uint8_t));
 
             return ss_header;
         }
+
         static inline uint8_t calculate_checksum(const char *data, size_t len)
         {
             uint8_t sum = 0;
@@ -119,7 +139,7 @@ namespace rudp_protocol
 
         static std::vector<channel_setup_info> deserialize_channel_setup_info(const char *buf, const uint32_t &len)
         {
-            // it shoudl start with 16 bits channel count, then it should have [ chanel id , len, payload   ] ...
+            // it shoudl start with 16 bits channel count, then it should have [ chanel id , len, payload ] ...
 
             std::vector<channel_setup_info> result;
             const char *ptr = buf;
@@ -187,10 +207,12 @@ namespace rudp_protocol
         void add_client(const client_id &cl_id)
         {
             clients_state_machine.emplace(cl_id);
+            client_stream_buffers.emplace();
         }
         void remove_client(const client_id &cl_id)
         {
             clients_state_machine.erase(cl_id);
+            client_stream_buffers.erase(cl_id);
         }
 
         std::jthread input_loop_thread;
@@ -207,26 +229,71 @@ namespace rudp_protocol
                 if (sp == nullptr)
                     return;
 
-                ssize_t len = sp->read_from_control_channel_blocking(ch_id, cl_id, ibuf->get_buffer(), ibuf->get_capacity());
-                if (len > 0)
+                ssize_t bytes_read = sp->read_from_control_channel_blocking(
+                    ch_id,
+                    cl_id,
+                    ibuf->get_buffer(),
+                    ibuf->get_capacity());
+
+                if (bytes_read <= 0 || ch_id != CONTROL_CHANNEL_ID)
                 {
-                    ibuf->set_length(len);
-                    handle_control_packet(cl_id, true, nullptr, ibuf->get_buffer(), ibuf->get_length());
+                    continue;
+                }
+
+                std::deque<char> &client_buffer = client_stream_buffers[cl_id];
+
+                client_buffer.insert(client_buffer.end(),
+                                     ibuf->get_const_buffer(),
+                                     ibuf->get_const_buffer() + bytes_read);
+
+                while (client_buffer.size() >= CONTROL_HEADER_SIZE)
+                {
+                    uint16_t net_total_len;
+
+                    char temp_len_bytes[sizeof(uint16_t)];
+                    temp_len_bytes[0] = client_buffer[0];
+                    temp_len_bytes[1] = client_buffer[1];
+                    memcpy(&net_total_len, temp_len_bytes, sizeof(uint16_t));
+
+                    uint16_t total_packet_size = ntohs(net_total_len);
+
+                    if (client_buffer.size() < total_packet_size)
+                    {
+                        break; // wait for more data.
+                    }
+
+                    std::unique_ptr<raw_packet> complete_packet = std::make_unique<raw_packet>(total_packet_size);
+
+                    for (size_t i = 0; i < total_packet_size; ++i)
+                    {
+                        complete_packet->get_buffer()[i] = client_buffer[i];
+                    }
+                    complete_packet->set_length(total_packet_size);
+
+                    handle_control_packet(cl_id, true, nullptr,
+                                          complete_packet->get_buffer(),
+                                          complete_packet->get_length());
+
+                    client_buffer.erase(client_buffer.begin(), client_buffer.begin() + total_packet_size);
                 }
             }
         }
 
     public:
-        // Within rudp_protocol::session_control class
-
         void handle_control_packet(const client_id &cl_id, bool is_active_connection, std::unique_ptr<i_sockaddr> source_addr, const char *ibuf, const uint32_t &sz)
         {
             if (sz < CONTROL_HEADER_SIZE)
                 return;
 
             control_header cur_header = deserialize_control_header(ibuf, sz);
+
+            // If the buffer size is less than what the header claims, the packet is incomplete/corrupt.
+            if (sz < cur_header.total_len)
+                return;
+
             const char *payload_ptr = ibuf + CONTROL_HEADER_SIZE;
-            uint32_t payload_len = sz - CONTROL_HEADER_SIZE;
+            // Use total_len from header to determine payload size
+            uint32_t payload_len = cur_header.total_len - CONTROL_HEADER_SIZE;
 
             client_id target_cl_id = cl_id;
             connection_state_machine *fsm = nullptr;
@@ -260,7 +327,8 @@ namespace rudp_protocol
             uint8_t final_flags = 0;
             if (cur_header.flags & (uint8_t)CONTROL_PACKET_HEADER_FLAGS::SUM)
             {
-                uint8_t actual_checksum = calculate_checksum(ibuf, sz);
+                // We use cur_header.total_len to be consistent with the packet definition
+                uint8_t actual_checksum = calculate_checksum(ibuf, cur_header.total_len);
                 if (actual_checksum != (~(uint8_t(0))))
                 {
                     return;
@@ -290,7 +358,10 @@ namespace rudp_protocol
             }
 
             final_flags |= result.response_flags;
-            if (cur_header.flags & (uint8_t)CONTROL_PACKET_HEADER_FLAGS::CHN)
+
+            bool needs_chn_response = (cur_header.flags & (uint8_t)CONTROL_PACKET_HEADER_FLAGS::CHN) && (final_flags != 0);
+
+            if (needs_chn_response)
                 final_flags |= uint8_t(CONTROL_PACKET_HEADER_FLAGS::CHN);
 
             if (final_flags == 0)
@@ -298,11 +369,11 @@ namespace rudp_protocol
 
             //
             std::unique_ptr<raw_packet> res_pkt = std::make_unique<raw_packet>(1500);
+            uint32_t current_offset = COMMON_HEADER_SIZE + CONTROL_HEADER_SIZE;
+            uint32_t control_payload_start = current_offset;
 
-            if (cur_header.flags & (uint8_t)CONTROL_PACKET_HEADER_FLAGS::CHN)
+            if (needs_chn_response)
             {
-                uint32_t current_offset = COMMON_HEADER_SIZE + CONTROL_HEADER_SIZE;
-
                 auto manager = data_channel_manager.lock();
                 if (!manager)
                     return;
@@ -314,7 +385,6 @@ namespace rudp_protocol
 
                 for (auto &i : received_setup_info)
                 {
-
                     channel_id ch_id = i.ch_id;
                     channel_setup_info res_setup_info;
 
@@ -348,12 +418,15 @@ namespace rudp_protocol
                 memcpy(res_pkt->get_buffer() + current_offset, &n_channel_cnt, sizeof(uint16_t));
 
                 current_offset = channel_data_offset;
-
-                res_pkt->set_length(current_offset);
             }
+
+            res_pkt->set_length(current_offset);
 
             control_header res_header;
             res_header.flags = final_flags;
+
+            // Calculate size of Control Header + Control Payload (exclude Common Header)
+            res_header.total_len = (uint16_t)(current_offset - COMMON_HEADER_SIZE);
 
             serialize_control_header(res_pkt->get_buffer() + COMMON_HEADER_SIZE, CONTROL_HEADER_SIZE, res_header);
 

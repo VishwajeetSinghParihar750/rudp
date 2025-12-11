@@ -123,6 +123,12 @@ public:
 // ---------------------------------------------------------
 // SEND WINDOW
 // ---------------------------------------------------------
+
+class segmentation_logic
+{
+    //
+};
+
 class send_window
 {
     char *buf;
@@ -226,7 +232,11 @@ public:
     {
         uint32_t used = (can_be_written_idx - sent_not_acked_idx + buf_size) % buf_size;
         uint32_t free = buf_size - 1 - used;
-        uint32_t to_write = std::min(free, sz);
+
+        if (free < sz)
+            return -1; // only send full segment for now
+
+        uint32_t to_write = sz;
         uint32_t chunk1 = std::min(to_write, buf_size - can_be_written_idx);
 
         memcpy(buf + can_be_written_idx, ibuf, chunk1);

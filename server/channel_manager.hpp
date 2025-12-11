@@ -30,7 +30,6 @@ struct rcv_ready_queue_info
     std::chrono::steady_clock::time_point arrival_time;
     client_id cl_id;
     channel_id ch_id;
-    rcv_block_info rcv_block;
 
     bool operator<(const rcv_ready_queue_info &other) const
     {
@@ -43,7 +42,6 @@ struct send_ready_queue_info
     std::chrono::steady_clock::time_point arrival_time;
     client_id cl_id;
     channel_id ch_id;
-    send_block_info send_block;
 
     bool operator<(const send_ready_queue_info &other) const
     {
@@ -83,8 +81,8 @@ class channel_manager : public i_server, public i_udp_callback, public i_session
 
     //  ⚠️⚠️⚠️ these other containers need to be made therad safe too
 
-    std::jthread event_loop_thread, sender_thread;
-    void event_loop(std::stop_token token)
+    std::jthread timers_event_loop_thread, sender_thread;
+    void timers_event_loop(std::stop_token token)
     {
         timer_info_ptr cur_timer_ptr = nullptr;
 
@@ -137,7 +135,7 @@ class channel_manager : public i_server, public i_udp_callback, public i_session
 
             if (ok && per_client_channels.contains(to_send_info.cl_id) && per_client_channels[to_send_info.cl_id].contains(to_send_info.ch_id) && client_sockaddr.contains(to_send_info.cl_id))
             {
-                std::unique_ptr<i_packet> pkt = per_client_channels[to_send_info.cl_id][to_send_info.ch_id]->read_send_block(to_send_info.send_block);
+                std::unique_ptr<i_packet> pkt = per_client_channels[to_send_info.cl_id][to_send_info.ch_id]->on_transport_send();
 
                 serialize_common_header(pkt->get_buffer() + rudp_protocol::COMMON_HEADER_OFFSET, pkt->get_capacity() - rudp_protocol::COMMON_HEADER_OFFSET, rudp_protocol::common_header(to_send_info.cl_id, to_send_info.ch_id));
 
@@ -198,37 +196,28 @@ class channel_manager : public i_server, public i_udp_callback, public i_session
         session_control_->handle_control_packet(cl_id, client_sockaddr.contains(cl_id), std::move(source_addr), ibuf, sz);
     }
 
-    void handle_if_ready_to_send(const std::unique_ptr<i_channel> &cur_channel, const channel_id &ch_id, const client_id &cl_id)
+    void add_to_ready_to_send_queue(const std::unique_ptr<i_channel> &cur_channel, const channel_id &ch_id, const client_id &cl_id)
     {
-        send_block_info cur_read_block = cur_channel->get_next_send_block_info();
-
-        if (cur_read_block.length > 0)
-        {
-            send_ready_queue_info cur_ready_list_info;
-            cur_ready_list_info.arrival_time = std::chrono::steady_clock::now();
-            cur_ready_list_info.ch_id = ch_id;
-            cur_ready_list_info.cl_id = cl_id;
-            ready_to_send_queue->push(cur_ready_list_info);
-        }
+        send_ready_queue_info cur_ready_list_info;
+        cur_ready_list_info.arrival_time = std::chrono::steady_clock::now();
+        cur_ready_list_info.ch_id = ch_id;
+        cur_ready_list_info.cl_id = cl_id;
+        ready_to_send_queue->push(cur_ready_list_info);
     }
-    void handle_if_ready_to_rcv(const std::unique_ptr<i_channel> &cur_channel, const channel_id &ch_id, const client_id &cl_id)
+    void add_to_ready_to_rcv_queue(const std::unique_ptr<i_channel> &cur_channel, const channel_id &ch_id, const client_id &cl_id)
     {
-        rcv_block_info cur_read_block = cur_channel->get_next_rcv_block_info();
+        rcv_ready_queue_info cur_ready_list_info;
+        cur_ready_list_info.arrival_time = std::chrono::steady_clock::now();
+        cur_ready_list_info.ch_id = ch_id;
+        cur_ready_list_info.cl_id = cl_id;
 
-        if (cur_read_block.length > 0)
-        {
-            rcv_ready_queue_info cur_ready_list_info;
-            cur_ready_list_info.arrival_time = std::chrono::steady_clock::now();
-            cur_ready_list_info.ch_id = ch_id;
-            cur_ready_list_info.cl_id = cl_id;
-
-            if (ch_id == CONTROL_CHANNEL_ID)
-                ready_to_rcv_control_queue->push(cur_ready_list_info);
-            else
-                ready_to_rcv_queue->push(cur_ready_list_info);
-        }
+        if (ch_id == CONTROL_CHANNEL_ID)
+            ready_to_rcv_control_queue->push(cur_ready_list_info);
+        else
+            ready_to_rcv_queue->push(cur_ready_list_info);
     }
 
+    // ℹ️ this is not thsi classes responsiblity
     std::unique_ptr<i_channel> create_new_channel(channel_id ch_id)
     {
         if (!channels.contains(ch_id))
@@ -279,7 +268,7 @@ public:
         channel_id_ = info.ch_id;
 
         auto &cur_channel = per_client_channels[client_id_][channel_id_];
-        return cur_channel->read_rcv_block(info.rcv_block, buf, len);
+        return cur_channel->read_bytes_to_application(buf, len);
     }
     ssize_t read_from_channel_blocking(channel_id &channel_id_, client_id &client_id_, char *buf, const size_t len) override
     {
@@ -289,19 +278,17 @@ public:
         channel_id_ = info.ch_id;
 
         auto &cur_channel = per_client_channels[client_id_][channel_id_];
-        return cur_channel->read_rcv_block(info.rcv_block, buf, len);
+        return cur_channel->read_bytes_to_application(buf, len);
     }
     ssize_t write_to_channel(const channel_id &channel_id_, const client_id &client_id_, const char *buf, const size_t len) override
     {
         auto &cur_channel = per_client_channels[client_id_][channel_id_];
         return cur_channel->write_bytes_from_application(buf, len);
-
-        handle_if_ready_to_send(cur_channel, channel_id_, client_id_);
     }
     void start_server() override
     {
-        event_loop_thread = (std::jthread([this](std::stop_token token)
-                                          { this->event_loop(std::move(token)); }));
+        timers_event_loop_thread = (std::jthread([this](std::stop_token token)
+                                                 { this->timers_event_loop(std::move(token)); }));
         sender_thread = (std::jthread([this](std::stop_token token)
                                       { this->sender_thread_loop(std::move(token)); }));
         udp_transport->start_io();
@@ -322,8 +309,6 @@ public:
             {
                 auto &cur_channel = per_client_channels[c_header.cl_id][c_header.ch_id];
                 cur_channel->on_transport_receive(pkt->get_buffer() + rudp_protocol::CHANNEL_HEADER_OFFSET, pkt->get_length() - rudp_protocol::CHANNEL_HEADER_OFFSET);
-
-                handle_if_ready_to_rcv(cur_channel, c_header.ch_id, c_header.cl_id);
             }
             // else client ID is coming from wrong source address, packet ignored.
         }
@@ -358,7 +343,7 @@ public:
     }
 
     // ⚠️ need to handle partial reading of blocks
-    ssize_t read_from_control_channel_nonblocking(channel_id &channel_id_, client_id &client_id_, char *buf, const size_t len) override
+    ssize_t read_from_control_channel_nonblocking(channel_id &channel_id_, client_id &client_id_, char *buf, const uint32_t &len) override
     {
         rcv_ready_queue_info info;
         bool result = ready_to_rcv_control_queue->pop(info);
@@ -370,9 +355,9 @@ public:
         channel_id_ = info.ch_id;
 
         auto &cur_channel = per_client_channels[client_id_][channel_id_];
-        return cur_channel->read_rcv_block(info.rcv_block, buf, len);
+        return cur_channel->read_bytes_to_application(buf, len);
     }
-    ssize_t read_from_control_channel_blocking(channel_id &channel_id_, client_id &client_id_, char *buf, const size_t len) override
+    ssize_t read_from_control_channel_blocking(channel_id &channel_id_, client_id &client_id_, char *buf, const uint32_t &len) override
     {
         rcv_ready_queue_info info = ready_to_rcv_control_queue->wait_and_pop();
 
@@ -380,7 +365,7 @@ public:
         channel_id_ = info.ch_id;
 
         auto &cur_channel = per_client_channels[client_id_][channel_id_];
-        return cur_channel->read_rcv_block(info.rcv_block, buf, len);
+        return cur_channel->read_bytes_to_application(buf, len);
     }
 
     void process_channel_setup_request(const client_id &cl_id, channel_setup_info ch_setup_info) override

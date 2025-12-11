@@ -10,21 +10,21 @@ class reliable_ordered_channel : public i_channel
     send_window snd_window;
     receive_window rcv_window;
 
-    client_id cl_id;
     channel_id ch_id;
 
-public:
-    reliable_ordered_channel(channel_id ch_id_) : cl_id(INVALID_CLIENT_ID), ch_id(ch_id_) {}
-    reliable_ordered_channel(client_id cl_id_, channel_id ch_id_) : cl_id(cl_id_), ch_id(ch_id_) {}
+    std::function<void()> on_app_data_ready, on_net_data_ready;
 
-    void set_client_id(client_id cl_id_) { cl_id = cl_id_; }
-    client_id get_client_id() { return cl_id; }
+public:
+    reliable_ordered_channel(channel_id ch_id_) : ch_id(ch_id_) {}
+
     void set_channel_id(channel_id ch_id_) { ch_id = ch_id_; }
     channel_id get_channel_id() { return ch_id; }
     std::unique_ptr<i_channel> clone() const { return std::make_unique<reliable_ordered_channel>(*this); }
 
-    //
-    channel_setup_info get_channel_setup_info() {}
+    // payload in netowrk byte order
+    channel_setup_info get_channel_setup_info()
+    {
+    }
     void process_channel_setup_info(channel_setup_info) {}
 
     rcv_block_info get_next_rcv_block_info() {} // this moved the to read block ahead
@@ -67,13 +67,16 @@ public:
         return pkt;
     }
 
-    ssize_t read_bytes_to_application(char *buf, const size_t &len) override
+    ssize_t read_bytes_to_application(char *buf, const uint32_t &len) override
     {
         return rcv_window.read_from_buffer(buf, len);
     }
 
-    ssize_t write_bytes_from_application(const char *buf, const size_t &len) override
+    ssize_t write_bytes_from_application(const char *buf, const uint32_t &len) override
     {
         return snd_window.write_into_buffer(buf, len);
     }
+
+    void set_app_data_ready_notifier(std::function<void()> f) override { on_app_data_ready = f; }
+    void set_net_data_ready_notifier(std::function<void()> f) override { on_net_data_ready = f; }
 };
