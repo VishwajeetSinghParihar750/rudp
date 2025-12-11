@@ -48,3 +48,5 @@ using client_id = uint64_t;
 inline constexpr channel_id INVALID_CHANNEL_ID = 0;
 inline constexpr client_id INVALID_CLIENT_ID = 0;
 inline constexpr channel_id CONTROL_CHANNEL_ID = 0;
+
+inline constexpr uint16_t MAX_CHANNEL_PACKET_SIZE = 65000;

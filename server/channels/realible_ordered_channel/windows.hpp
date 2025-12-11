@@ -17,6 +17,9 @@ class receive_window
 
     sack_logic sack_handler;
 
+    bool to_send_ack = false;
+    bool to_send_winsz = false;
+
     uint16_t deserialize_header(const char *buf, rudp_header &h)
     {
         uint32_t sum = 0;
@@ -144,9 +147,12 @@ class send_window
     uint32_t snd_una; // Sequence number of sent_not_acked_idx
     uint32_t snd_nxt; // Sequence number of can_be_sent_idx
 
-    uint16_t serialize_header(char *out_buf, uint32_t ack_no, uint16_t win_sz)
+    uint16_t serialize_header(char *out_buf, bool send_ack, uint32_t ack_no, bool send_winsz, uint16_t win_sz)
     {
         rudp_header h{snd_nxt, ack_no, win_sz, 0, 0};
+
+        // add flags for winsz and ack no
+
         uint32_t seq = htonl(h.seq_no), ack = htonl(h.ack_no);
         uint16_t win = htons(h.win_sz), flg = htons(h.flags), zero = 0;
 
@@ -204,7 +210,7 @@ public:
 
     void set_remote_window(uint16_t w) { remote_win_sz = w; }
 
-    uint32_t send_packet(char *pkt_buf, uint32_t ack_to_send, uint16_t win_to_send)
+    uint32_t send_packet(char *pkt_buf, uint32_t sz, bool to_send_ack, uint32_t ack_to_send, bool to_send_winsz, uint16_t win_to_send)
     {
         uint32_t buffered = (can_be_written_idx - can_be_sent_idx + buf_size) % buf_size;
         uint32_t inflight = (can_be_sent_idx - sent_not_acked_idx + buf_size) % buf_size;
@@ -212,12 +218,13 @@ public:
         if (inflight >= remote_win_sz)
             return 0;
         uint32_t allowed = std::min(buffered, (uint32_t)(remote_win_sz - inflight));
-        uint32_t payload_sz = std::min(allowed, (uint32_t)MAX_MSS);
+        uint32_t total_sz = std::min(allowed, sz);
+        uint32_t payload_sz = total_sz - HEADER_SIZE;
 
-        if (payload_sz == 0)
+        if (payload_sz < 0)
             return 0;
 
-        uint16_t csum_l = serialize_header(pkt_buf, ack_to_send, win_to_send);
+        uint16_t csum_l = serialize_header(pkt_buf, to_send_ack, ack_to_send, to_send_winsz, win_to_send);
         uint16_t csum_r = serialize_payload(pkt_buf + HEADER_SIZE, payload_sz);
         uint16_t final = htons(~static_cast<uint16_t>(fold_and_accumulate(uint32_t(csum_l) + csum_r)));
         memcpy(pkt_buf + 12, &final, 2);

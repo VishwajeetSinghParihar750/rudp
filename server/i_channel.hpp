@@ -25,24 +25,16 @@ struct channel_setup_info
     std::unique_ptr<i_packet> payload;
 };
 
+
 class i_channel
 {
 
 public:
-    virtual void set_client_id(client_id cl_id) = 0;
-    virtual client_id get_client_id() = 0;
-
     virtual std::unique_ptr<i_channel> clone() const = 0;
-    //
-
-    virtual rcv_block_info get_next_rcv_block_info() = 0; // this moved the to read block ahead
-    virtual send_block_info get_next_send_block_info() = 0;
-
-    virtual ssize_t read_rcv_block(rcv_block_info, char *buf, const uint32_t &len) = 0;
-    virtual std::unique_ptr<i_packet> read_send_block(send_block_info) = 0;
 
     // recieve from client what came on udp
     virtual void on_transport_receive(const char *ibuf, const uint32_t &sz) = 0;
+    virtual channel_id get_channel_id() const = 0;
 
     virtual std::unique_ptr<i_packet> on_transport_send() = 0;
 

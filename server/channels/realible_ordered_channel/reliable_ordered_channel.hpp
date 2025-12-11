@@ -14,24 +14,21 @@ class reliable_ordered_channel : public i_channel
 
     std::function<void()> on_app_data_ready, on_net_data_ready;
 
+    static constexpr uint16_t MAX_RELIABLE_ORDERED_CHANNEL_PACKET_SIZE = 1400;
+
 public:
     reliable_ordered_channel(channel_id ch_id_) : ch_id(ch_id_) {}
 
-    void set_channel_id(channel_id ch_id_) { ch_id = ch_id_; }
-    channel_id get_channel_id() { return ch_id; }
-    std::unique_ptr<i_channel> clone() const { return std::make_unique<reliable_ordered_channel>(*this); }
+    channel_id get_channel_id() const override { return ch_id; }
+    std::unique_ptr<i_channel> clone() const override { return std::make_unique<reliable_ordered_channel>(*this); }
 
     // payload in netowrk byte order
-    channel_setup_info get_channel_setup_info()
+    channel_setup_info get_channel_setup_info() override
     {
     }
-    void process_channel_setup_info(channel_setup_info) {}
-
-    rcv_block_info get_next_rcv_block_info() {} // this moved the to read block ahead
-    send_block_info get_next_send_block_info() {}
-
-    ssize_t read_rcv_block(rcv_block_info, char *buf, const uint32_t &len) {}
-    std::unique_ptr<i_packet> read_send_block(send_block_info) {}
+    void process_channel_setup_info(channel_setup_info) override
+    {
+    }
 
     // Incoming Packet from Network
     void on_transport_receive(const char *ibuf, const uint32_t &sz) override
@@ -51,7 +48,9 @@ public:
     // Outgoing Packet to Network
     std::unique_ptr<i_packet> on_transport_send() override
     {
-        auto pkt = std::make_unique<raw_packet>(1500);
+        uint16_t sz = MAX_RELIABLE_ORDERED_CHANNEL_PACKET_SIZE + rudp_protocol::CHANNEL_HEADER_OFFSET;
+
+        auto pkt = std::make_unique<raw_packet>(sz);
         size_t offset = rudp_protocol::CHANNEL_HEADER_OFFSET;
 
         // CRITICAL FIX: Piggyback ACK and Window Size
