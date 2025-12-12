@@ -47,4 +47,6 @@ public:
     {
         return expiration_time < other.expiration_time;
     }
+
+    timer_id get_id() const { return id; }
 };

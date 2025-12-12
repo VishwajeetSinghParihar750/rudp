@@ -217,7 +217,6 @@ class channel_manager : public i_server, public i_udp_callback, public i_session
             ready_to_rcv_queue->push(cur_ready_list_info);
     }
 
-    // ℹ️ this is not thsi classes responsiblity
     std::unique_ptr<i_channel> create_new_channel(channel_id ch_id)
     {
         if (!channels.contains(ch_id))
@@ -226,7 +225,18 @@ class channel_manager : public i_server, public i_udp_callback, public i_session
         switch (channels[ch_id])
         {
         case channel_type::RELIABLE_ORDERED_CHANNEL:
-            return std::make_unique<reliable_ordered_channel>(ch_id);
+        {
+            auto ch = std::make_unique<reliable_ordered_channel>(ch_id);
+
+            ch->set_timer_allocator([this](duration_ms timeout, timer_info::callback cb) -> timer_info_ptr
+                                    {
+                auto id = get_random_uint64_t();
+                auto t = std::make_shared<timer_info>(id, timeout, cb);
+                timers.push(t); 
+            return t; });
+
+            return ch;
+        }
 
         default:
             return nullptr;
@@ -342,7 +352,6 @@ public:
         client_sockaddr.erase(cl_id);
     }
 
-    // ⚠️ need to handle partial reading of blocks
     ssize_t read_from_control_channel_nonblocking(channel_id &channel_id_, client_id &client_id_, char *buf, const uint32_t &len) override
     {
         rcv_ready_queue_info info;
@@ -355,7 +364,9 @@ public:
         channel_id_ = info.ch_id;
 
         auto &cur_channel = per_client_channels[client_id_][channel_id_];
-        return cur_channel->read_bytes_to_application(buf, len);
+        ssize_t toret = cur_channel->read_bytes_to_application(buf, len);
+        if (toret == 0)
+            return read_from_control_channel_nonblocking(channel_id_, client_id_, buf, len);
     }
     ssize_t read_from_control_channel_blocking(channel_id &channel_id_, client_id &client_id_, char *buf, const uint32_t &len) override
     {
@@ -366,6 +377,10 @@ public:
 
         auto &cur_channel = per_client_channels[client_id_][channel_id_];
         return cur_channel->read_bytes_to_application(buf, len);
+
+        ssize_t toret = cur_channel->read_bytes_to_application(buf, len);
+        if (toret == 0)
+            return read_from_channel_blocking(channel_id_, client_id_, buf, len);
     }
 
     void process_channel_setup_request(const client_id &cl_id, channel_setup_info ch_setup_info) override

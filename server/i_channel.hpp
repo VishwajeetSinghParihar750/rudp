@@ -5,6 +5,12 @@
 #include "i_packet.hpp"
 #include "raw_packet.hpp"
 #include "rudp_protocol.hpp"
+#include "timer_info.hpp"
+
+using timer_info_ptr = std::shared_ptr<timer_info>;
+using duration_ms = ::duration_ms;
+using timer_callback = timer_info::callback;
+using timer_allocator_t = std::function<timer_info_ptr(duration_ms, timer_callback)>;
 
 // these should have info about one complete packet and never return half packet read when asked to be read
 struct rcv_block_info
@@ -51,4 +57,8 @@ public:
     //
     virtual void set_app_data_ready_notifier(std::function<void()>) = 0;
     virtual void set_net_data_ready_notifier(std::function<void()>) = 0;
+
+    // Timer-related API
+    virtual void set_timer_allocator(timer_allocator_t allocator) = 0;
+
 };
