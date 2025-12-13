@@ -4,8 +4,8 @@
 #include <iostream>
 #include <functional>
 
-using clock = std::chrono::steady_clock;
-using timepoint = clock::time_point;
+using TimerInfoClock = std::chrono::steady_clock;
+using TimerInfoTimePoint = TimerInfoClock::time_point;
 using duration_ms = std::chrono::milliseconds;
 
 class timer_info
@@ -16,16 +16,16 @@ public:
 
 private:
     timer_id id;
-    timepoint expiration_time;
+    TimerInfoTimePoint expiration_time;
     callback on_expire;
 
 public:
     timer_info(timer_id id_, duration_ms timeout_in_ms, callback on_expire_)
-        : id(id_), expiration_time(clock::now() + timeout_in_ms), on_expire(on_expire_) {}
+        : id(id_), expiration_time(TimerInfoClock::now() + timeout_in_ms), on_expire(on_expire_) {}
 
     bool has_expired() const
     {
-        return clock::now() >= expiration_time;
+        return TimerInfoClock::now() >= expiration_time;
     }
 
     void execute_on_expire_callback()
@@ -35,7 +35,7 @@ public:
 
     duration_ms time_remaining_in_ms() const
     {
-        timepoint now = clock::now();
+        TimerInfoTimePoint now = TimerInfoClock::now();
         if (now >= expiration_time)
         {
             return duration_ms(0);

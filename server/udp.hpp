@@ -11,16 +11,16 @@
 #include <sys/epoll.h>
 #include <iostream>
 #include <sys/socket.h>
+#include "sys/ioctl.h"
 
 #include "types.hpp"
-#include "raw_packet.hpp"
 #include "i_udp_callback.hpp"
-#include "i_sockaddr.hpp"
+#include "transport_addr.hpp"
 #include "wrapper_sockaddr.hpp"
 
 class udp
 {
-    std::weak_ptr<i_udp_callback> channel_manager_;
+    std::weak_ptr<i_udp_callback> session_control_;
 
     int socket_fd = -1;
     int epoll_fd = -1;
@@ -95,7 +95,7 @@ class udp
 
         constexpr int MAX_EVENTS = 2048;
         epoll_event event, events[MAX_EVENTS];
-        std::shared_ptr<i_udp_callback> channel_manager_sp;
+        std::shared_ptr<i_udp_callback> session_control_sp;
 
         int event_cnt = 0;
         while (!token.stop_requested())
@@ -120,8 +120,14 @@ class udp
                 int current_fd = events[ind].data.fd;
                 if (current_fd == socket_fd)
                 {
-                    std::unique_ptr<raw_packet> pkt = std::make_unique<raw_packet>(1500);
-                    std::unique_ptr<i_sockaddr> addr = std::make_unique<wrapper_sockaddr>();
+                    //
+
+                    size_t bytes_avail = 0;
+
+                    ioctl(socket_fd, FIONREAD, &bytes_avail);
+
+                    std::unique_ptr<rudp_protocol_packet> pkt = std::make_unique<rudp_protocol_packet>(bytes_avail);
+                    std::unique_ptr<transport_addr> addr = std::make_unique<transport_addr>();
 
                     int n = recvfrom(socket_fd, pkt->get_buffer(), pkt->get_capacity(), 0, addr->get_mutable_sockaddr(), addr->get_mutable_socklen());
 
@@ -133,9 +139,9 @@ class udp
                     else
                     {
                         pkt->set_length(n);
-                        channel_manager_sp = channel_manager_.lock();
-                        if (channel_manager_sp != nullptr)
-                            channel_manager_sp->on_transport_receive(std::move(pkt), std::move(addr));
+                        session_control_sp = session_control_.lock();
+                        if (session_control_sp != nullptr)
+                            session_control_sp->on_transport_receive(std::move(pkt), std::move(addr));
                         else
                             return;
                     }
@@ -208,17 +214,17 @@ public:
         io_thread.join();
     }
 
-    ssize_t send_packet_to_network(const i_sockaddr &addr, const i_packet &packet)
+    ssize_t send_packet_to_network(const transport_addr &addr, const char *buf, const size_t &len)
     {
         return sendto(
             socket_fd,
-            packet.get_const_buffer(), packet.get_length(),
+            buf, len,
             0,
-            addr.get_sockaddr(), addr.get_socklen());
+            addr.get_sockaddr(), *addr.get_socklen());
     }
 
     void set_channel_manager(std::weak_ptr<i_udp_callback> cm)
     {
-        channel_manager_ = cm;
+        session_control_ = cm;
     }
 };

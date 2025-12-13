@@ -10,7 +10,7 @@ class i_server
 {
 
 public:
-    virtual channel_id add_channel(channel_type type) = 0;
+    virtual void add_channel(channel_id,channel_type type) = 0;
 
     virtual void start_server() = 0;
 

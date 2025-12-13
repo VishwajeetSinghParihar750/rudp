@@ -1,7 +1,7 @@
 #pragma once
 
 #include "../../i_channel.hpp"
-#include "../../raw_packet.hpp"
+#include "../../rudp_protocol_packet.hpp"
 #include <map>
 #include <deque>
 #include <cstring>
@@ -480,28 +480,28 @@ private:
     receive_window rcv_window;
     flag_manager flags;
     std::function<void()> on_app_data_ready;
-    std::function<void()> on_net_data_ready;
+    std::function<void(std::unique_ptr<rudp_protocol_packet>)> on_net_data_ready;
 
     timer_allocator_t timer_allocator_ = nullptr;
 
     // === Timer IDs and State ===
-    std::atomic<uint64_t> rto_timer_id{0};           // Retransmission timeout
-    std::atomic<uint64_t> keepalive_timer_id{0};     // Keep-alive timer
-    std::atomic<uint64_t> delayed_ack_timer_id{0};   // Delayed ACK timer
-    std::atomic<uint64_t> fin_wait_timer_id{0};      // FIN wait timer
-    std::atomic<bool> is_closing{false};             // Graceful close state
+    std::atomic<uint64_t> rto_timer_id{0};         // Retransmission timeout
+    std::atomic<uint64_t> keepalive_timer_id{0};   // Keep-alive timer
+    std::atomic<uint64_t> delayed_ack_timer_id{0}; // Delayed ACK timer
+    std::atomic<uint64_t> fin_wait_timer_id{0};    // FIN wait timer
+    std::atomic<bool> is_closing{false};           // Graceful close state
 
     // === Timer Configuration ===
-    static constexpr uint64_t KEEPALIVE_INTERVAL_MS = 30000;  // 30 seconds
-    static constexpr uint64_t DELAYED_ACK_MS = 40;             // 40ms delayed ACK
-    static constexpr uint64_t FIN_WAIT_MS = 2000;              // 2 second FIN wait
+    static constexpr uint64_t KEEPALIVE_INTERVAL_MS = 30000; // 30 seconds
+    static constexpr uint64_t DELAYED_ACK_MS = 40;           // 40ms delayed ACK
+    static constexpr uint64_t FIN_WAIT_MS = 2000;            // 2 second FIN wait
 
     // === Timer Handlers ===
     void on_rto_expire()
     {
         // Retransmission timeout: trigger immediate send
-        if (on_net_data_ready)
-            on_net_data_ready();
+        // if (on_net_data_ready)
+        //     on_net_data_ready();
 
         // Reschedule RTO
         schedule_rto_timer();
@@ -511,8 +511,8 @@ private:
     {
         // Send keepalive ACK if no data in flight
         flags.set_send_ack(true);
-        if (on_net_data_ready)
-            on_net_data_ready();
+        // if (on_net_data_ready)
+        //     on_net_data_ready();
 
         // Reschedule keepalive
         schedule_keepalive_timer();
@@ -521,11 +521,11 @@ private:
     void on_delayed_ack_expire()
     {
         // Flush pending ACK
-        if (rcv_window.is_ack_pending())
-        {
-            if (on_net_data_ready)
-                on_net_data_ready();
-        }
+        // if (rcv_window.is_ack_pending())
+        // {
+        //     if (on_net_data_ready)
+        //         on_net_data_ready();
+        // }
     }
 
     void on_fin_wait_expire()
@@ -540,7 +540,8 @@ private:
         if (!timer_allocator_)
             return;
 
-        auto cb = [this]() { this->on_rto_expire(); };
+        auto cb = [this]()
+        { this->on_rto_expire(); };
         timer_info_ptr t = timer_allocator_(duration_ms(ordered_channel_config::RTO_MS), cb);
         if (t)
             rto_timer_id.store(t->get_id(), std::memory_order_release);
@@ -551,7 +552,8 @@ private:
         if (!timer_allocator_)
             return;
 
-        auto cb = [this]() { this->on_keepalive_expire(); };
+        auto cb = [this]()
+        { this->on_keepalive_expire(); };
         timer_info_ptr t = timer_allocator_(duration_ms(KEEPALIVE_INTERVAL_MS), cb);
         if (t)
             keepalive_timer_id.store(t->get_id(), std::memory_order_release);
@@ -566,7 +568,8 @@ private:
         if (delayed_ack_timer_id.load(std::memory_order_acquire) != 0)
             return;
 
-        auto cb = [this]() { this->on_delayed_ack_expire(); };
+        auto cb = [this]()
+        { this->on_delayed_ack_expire(); };
         timer_info_ptr t = timer_allocator_(duration_ms(DELAYED_ACK_MS), cb);
         if (t)
             delayed_ack_timer_id.store(t->get_id(), std::memory_order_release);
@@ -577,7 +580,8 @@ private:
         if (!timer_allocator_)
             return;
 
-        auto cb = [this]() { this->on_fin_wait_expire(); };
+        auto cb = [this]()
+        { this->on_fin_wait_expire(); };
         timer_info_ptr t = timer_allocator_(duration_ms(FIN_WAIT_MS), cb);
         if (t)
             fin_wait_timer_id.store(t->get_id(), std::memory_order_release);
@@ -598,7 +602,7 @@ public:
         channel_setup_info info;
         info.ch_id = ch_id;
 
-        auto payload = std::make_unique<raw_packet>(6);
+        auto payload = std::make_unique<rudp_protocol_packet>(6);
         char *buf = payload->get_buffer();
 
         uint32_t init_seq = htonl(rcv_window.get_initial_seq_no());
@@ -647,10 +651,10 @@ public:
             on_app_data_ready();
 
         // Schedule delayed ACK on data receipt
-        if (payload_len > 0 && rcv_window.is_ack_pending())
-            schedule_delayed_ack_timer();
-        else if (rcv_window.is_ack_pending() && on_net_data_ready)
-            on_net_data_ready();
+        // if (payload_len > 0 && rcv_window.is_ack_pending())
+        //     schedule_delayed_ack_timer();
+        // else if (rcv_window.is_ack_pending() && on_net_data_ready)
+        //     on_net_data_ready();
     }
 
     std::unique_ptr<i_packet> on_transport_send() override
@@ -669,7 +673,7 @@ public:
 
         uint32_t total_size = rudp_protocol::CHANNEL_HEADER_OFFSET +
                               ordered_channel_config::HEADER_SIZE + payload_len;
-        auto packet = std::make_unique<raw_packet>(total_size);
+        auto packet = std::make_unique<rudp_protocol_packet>(total_size);
         char *pkt_buf = packet->get_buffer() + rudp_protocol::CHANNEL_HEADER_OFFSET;
 
         channel_header header{};
@@ -706,18 +710,18 @@ public:
 
     ssize_t write_bytes_from_application(const char *buf, const uint32_t &len) override
     {
-        ssize_t written = snd_window.write_data(buf, len);
-        if (written > 0 && on_net_data_ready)
-            on_net_data_ready();
-        return written;
+        // ssize_t written = snd_window.write_data(buf, len);
+        // if (written > 0 && on_net_data_ready)
+        //     on_net_data_ready();
+        // return written;
     }
 
-    void set_app_data_ready_notifier(std::function<void()> f) override
+    void set_on_app_data_ready(std::function<void()> f) override
     {
         on_app_data_ready = f;
     }
 
-    void set_net_data_ready_notifier(std::function<void()> f) override
+    void set_on_net_data_ready(std::function<void(std::unique_ptr<rudp_protocol_packet>)> f) override
     {
         on_net_data_ready = f;
     }
