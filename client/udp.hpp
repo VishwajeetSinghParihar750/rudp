@@ -140,8 +140,6 @@ class udp
         }
     }
 
-    void do_handshake() {}
-
 public:
     udp(const char *host, const char *port) // like "4004"
     {
@@ -153,8 +151,6 @@ public:
     {
         io_thread = std::jthread([this](std::stop_token token)
                                  { this->event_loop(std::move(token)); });
-
-        do_handshake();
     }
 
     ~udp()

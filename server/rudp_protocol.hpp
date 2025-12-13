@@ -8,16 +8,192 @@
 #include <cassert>
 #include <thread>
 #include <arpa/inet.h>
+#include <unordered_map>
+#include <deque>
 
 #include "raw_packet.hpp"
 #include "types.hpp"
-#include "channel_manager.hpp"
 #include "i_session_control_callback.hpp"
+#include "i_channel.hpp"
 
 // out one packet will be at max 16 bits, coz udp
 
 namespace rudp_protocol
 {
+
+    enum class CONNECTION_STATE
+    {
+        CLOSED,
+        LISTEN,
+        SYN_RCVD,
+        ESTABLISHED,
+        CLOSE_WAIT,
+        LAST_ACK,
+        FIN_WAIT1,
+        FIN_WAIT2,
+        CLOSING,
+        TIME_WAIT
+    };
+
+    enum class CONTROL_PACKET_HEADER_FLAGS : uint8_t
+    {
+        SYN = 1,
+        ACK = (1 << 1),
+        RST = (1 << 2),
+        FIN = (1 << 3),
+        SUM = (1 << 4), // reserved bits are checksum
+        CHN = (1 << 5)  // has channels info
+    };
+
+    struct connection_state_machine
+    {
+        CONNECTION_STATE current_state = CONNECTION_STATE::LISTEN;
+
+        struct fsm_result
+        {
+            uint8_t response_flags = 0;
+            bool close_connection = false;
+        };
+
+        uint8_t get_ack_flag() const
+        {
+            return (uint8_t)CONTROL_PACKET_HEADER_FLAGS ::ACK;
+        }
+
+        uint8_t get_rst_flag() const
+        {
+            return (uint8_t)CONTROL_PACKET_HEADER_FLAGS::RST;
+        }
+
+        uint8_t get_fin_flag() const
+        {
+            return (uint8_t)CONTROL_PACKET_HEADER_FLAGS::FIN;
+        }
+
+        fsm_result close()
+        {
+            if (current_state == CONNECTION_STATE::SYN_RCVD)
+            {
+                current_state = CONNECTION_STATE::CLOSED;
+                return {get_rst_flag(), true};
+            }
+            else if (current_state == CONNECTION_STATE::ESTABLISHED)
+            {
+                current_state = CONNECTION_STATE::FIN_WAIT1;
+                return {get_fin_flag(), false};
+            }
+            else if (current_state == CONNECTION_STATE::CLOSE_WAIT)
+            {
+                current_state = CONNECTION_STATE::LAST_ACK;
+                return {get_fin_flag(), false};
+            }
+            return {0, false};
+        }
+
+        fsm_result handle_change(uint8_t rcvd_flags)
+        {
+            if (rcvd_flags & get_rst_flag())
+            {
+                if (current_state != CONNECTION_STATE::LISTEN && current_state != CONNECTION_STATE::CLOSED)
+                {
+                    current_state = CONNECTION_STATE::CLOSED;
+                    return {0, true};
+                }
+                return {0, false};
+            }
+
+            switch (current_state)
+            {
+            case CONNECTION_STATE::LISTEN:
+            {
+                if (rcvd_flags == (uint8_t)CONTROL_PACKET_HEADER_FLAGS::SYN)
+                {
+                    current_state = CONNECTION_STATE::SYN_RCVD;
+                    return {(uint8_t)CONTROL_PACKET_HEADER_FLAGS::SYN | get_ack_flag(), false};
+                }
+                else
+                {
+                    return {get_rst_flag(), false};
+                }
+            }
+
+            case CONNECTION_STATE::SYN_RCVD:
+            {
+                if (rcvd_flags & get_rst_flag())
+                {
+                    current_state = CONNECTION_STATE::CLOSED;
+                    return {0, true};
+                }
+                else if (rcvd_flags == get_ack_flag())
+                {
+                    current_state = CONNECTION_STATE::ESTABLISHED;
+                    return {0, false};
+                }
+                else
+                {
+                    return {get_rst_flag(), false};
+                }
+            }
+            case CONNECTION_STATE::ESTABLISHED:
+            {
+                if (rcvd_flags == get_fin_flag())
+                {
+                    current_state = CONNECTION_STATE::CLOSE_WAIT;
+                    return {get_ack_flag(), false};
+                }
+                return {0, false};
+            }
+            case CONNECTION_STATE::LAST_ACK:
+            {
+                if (rcvd_flags == get_ack_flag())
+                {
+                    current_state = CONNECTION_STATE::CLOSED;
+                    return {0, true};
+                }
+                return {0, false};
+            }
+            case CONNECTION_STATE::FIN_WAIT1:
+            {
+                if (rcvd_flags == get_ack_flag())
+                {
+                    current_state = CONNECTION_STATE::FIN_WAIT2;
+                    return {0, false};
+                }
+                else if (rcvd_flags == get_fin_flag())
+                {
+                    current_state = CONNECTION_STATE::CLOSING;
+                    return {get_ack_flag(), false};
+                }
+                else if (rcvd_flags == (get_fin_flag() | get_ack_flag()))
+                {
+                    current_state = CONNECTION_STATE::TIME_WAIT;
+                    return {get_ack_flag(), false};
+                }
+                return {0, false};
+            }
+            case CONNECTION_STATE::FIN_WAIT2:
+            {
+                if (rcvd_flags == get_fin_flag())
+                {
+                    current_state = CONNECTION_STATE::TIME_WAIT;
+                    return {get_ack_flag(), false};
+                }
+                return {0, false};
+            }
+            case CONNECTION_STATE::CLOSING:
+            {
+                if (rcvd_flags == get_ack_flag())
+                {
+                    current_state = CONNECTION_STATE::TIME_WAIT;
+                    return {0, false};
+                }
+                return {0, false};
+            }
+            default:
+                return {0, false};
+            }
+        }
+    };
 
     // constants
 
@@ -453,184 +629,8 @@ namespace rudp_protocol
             auto sp = data_channel_manager.lock();
             assert(sp != nullptr);
 
-            sp->add_control_channel(channel_type::RELIABLE_ORDERED_CHANNEL);
-
             input_loop_thread = std::jthread([&](std::stop_token stoken)
                                              { input_event_loop(std::move(stoken)); });
         }
     };
-};
-
-enum class CONNECTION_STATE
-{
-    CLOSED,
-    LISTEN,
-    SYN_RCVD,
-    ESTABLISHED,
-    CLOSE_WAIT,
-    LAST_ACK,
-    FIN_WAIT1,
-    FIN_WAIT2,
-    CLOSING,
-    TIME_WAIT
-};
-
-enum class CONTROL_PACKET_HEADER_FLAGS : uint8_t
-{
-    SYN = 1,
-    ACK = (1 << 1),
-    RST = (1 << 2),
-    FIN = (1 << 3),
-    SUM = (1 << 4), // reserved bits are checksum
-    CHN = (1 << 5)  // has channels info
-};
-
-struct connection_state_machine
-{
-    CONNECTION_STATE current_state = CONNECTION_STATE::LISTEN;
-
-    struct fsm_result
-    {
-        uint8_t response_flags = 0;
-        bool close_connection = false;
-    };
-
-    uint8_t get_ack_flag() const
-    {
-        return (uint8_t)CONTROL_PACKET_HEADER_FLAGS ::ACK;
-    }
-
-    uint8_t get_rst_flag() const
-    {
-        return (uint8_t)CONTROL_PACKET_HEADER_FLAGS::RST;
-    }
-
-    uint8_t get_fin_flag() const
-    {
-        return (uint8_t)CONTROL_PACKET_HEADER_FLAGS::FIN;
-    }
-
-    fsm_result close()
-    {
-        if (current_state == CONNECTION_STATE::SYN_RCVD)
-        {
-            current_state = CONNECTION_STATE::CLOSED;
-            return {get_rst_flag(), true};
-        }
-        else if (current_state == CONNECTION_STATE::ESTABLISHED)
-        {
-            current_state = CONNECTION_STATE::FIN_WAIT1;
-            return {get_fin_flag(), false};
-        }
-        else if (current_state == CONNECTION_STATE::CLOSE_WAIT)
-        {
-            current_state = CONNECTION_STATE::LAST_ACK;
-            return {get_fin_flag(), false};
-        }
-        return {0, false};
-    }
-
-    fsm_result handle_change(uint8_t rcvd_flags)
-    {
-        if (rcvd_flags & get_rst_flag())
-        {
-            if (current_state != CONNECTION_STATE::LISTEN && current_state != CONNECTION_STATE::CLOSED)
-            {
-                current_state = CONNECTION_STATE::CLOSED;
-                return {0, true};
-            }
-            return {0, false};
-        }
-
-        switch (current_state)
-        {
-        case CONNECTION_STATE::LISTEN:
-        {
-            if (rcvd_flags == (uint8_t)CONTROL_PACKET_HEADER_FLAGS::SYN)
-            {
-                current_state = CONNECTION_STATE::SYN_RCVD;
-                return {(uint8_t)CONTROL_PACKET_HEADER_FLAGS::SYN | get_ack_flag(), false};
-            }
-            else
-            {
-                return {get_rst_flag(), false};
-            }
-        }
-
-        case CONNECTION_STATE::SYN_RCVD:
-        {
-            if (rcvd_flags & get_rst_flag())
-            {
-                current_state = CONNECTION_STATE::CLOSED;
-                return {0, true};
-            }
-            else if (rcvd_flags == get_ack_flag())
-            {
-                current_state = CONNECTION_STATE::ESTABLISHED;
-                return {0, false};
-            }
-            else
-            {
-                return {get_rst_flag(), false};
-            }
-        }
-        case CONNECTION_STATE::ESTABLISHED:
-        {
-            if (rcvd_flags == get_fin_flag())
-            {
-                current_state = CONNECTION_STATE::CLOSE_WAIT;
-                return {get_ack_flag(), false};
-            }
-            return {0, false};
-        }
-        case CONNECTION_STATE::LAST_ACK:
-        {
-            if (rcvd_flags == get_ack_flag())
-            {
-                current_state = CONNECTION_STATE::CLOSED;
-                return {0, true};
-            }
-            return {0, false};
-        }
-        case CONNECTION_STATE::FIN_WAIT1:
-        {
-            if (rcvd_flags == get_ack_flag())
-            {
-                current_state = CONNECTION_STATE::FIN_WAIT2;
-                return {0, false};
-            }
-            else if (rcvd_flags == get_fin_flag())
-            {
-                current_state = CONNECTION_STATE::CLOSING;
-                return {get_ack_flag(), false};
-            }
-            else if (rcvd_flags == (get_fin_flag() | get_ack_flag()))
-            {
-                current_state = CONNECTION_STATE::TIME_WAIT;
-                return {get_ack_flag(), false};
-            }
-            return {0, false};
-        }
-        case CONNECTION_STATE::FIN_WAIT2:
-        {
-            if (rcvd_flags == get_fin_flag())
-            {
-                current_state = CONNECTION_STATE::TIME_WAIT;
-                return {get_ack_flag(), false};
-            }
-            return {0, false};
-        }
-        case CONNECTION_STATE::CLOSING:
-        {
-            if (rcvd_flags == get_ack_flag())
-            {
-                current_state = CONNECTION_STATE::TIME_WAIT;
-                return {0, false};
-            }
-            return {0, false};
-        }
-        default:
-            return {0, false};
-        }
-    }
 };

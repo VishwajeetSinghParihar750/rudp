@@ -10,5 +10,5 @@ class i_udp_callback
 public:
     virtual ~i_udp_callback() = default;
 
-    virtual ssize_t on_transport_receive(std::unique_ptr<i_packet> pkt, std::unique_ptr<i_sockaddr> source_addr) = 0;
+    virtual void on_transport_receive(std::unique_ptr<i_packet> pkt, std::unique_ptr<i_sockaddr> source_addr) = 0;
 };

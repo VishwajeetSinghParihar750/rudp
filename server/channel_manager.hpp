@@ -297,6 +297,8 @@ public:
     }
     void start_server() override
     {
+        channels.emplace(CONTROL_CHANNEL_ID, channel_type::RELIABLE_ORDERED_CHANNEL);
+
         timers_event_loop_thread = (std::jthread([this](std::stop_token token)
                                                  { this->timers_event_loop(std::move(token)); }));
         sender_thread = (std::jthread([this](std::stop_token token)
@@ -330,10 +332,7 @@ public:
     }
 
     // for i session control
-    void add_control_channel(channel_type type) override
-    {
-        channels.emplace(CONTROL_CHANNEL_ID, type);
-    }
+
     void add_client(const client_id &cl_id, const i_sockaddr &sock_addr) override
     {
         client_sockaddr[cl_id] = std::make_shared<i_sockaddr>(sock_addr);

@@ -7,6 +7,13 @@
 #include <random>
 #include <cstdint>
 
+using channel_id = uint64_t;
+using client_id = uint64_t;
+inline constexpr channel_id INVALID_CHANNEL_ID = 0;
+inline constexpr client_id INVALID_CLIENT_ID = 0;
+inline constexpr channel_id CONTROL_CHANNEL_ID = 0;
+
+inline constexpr uint16_t MAX_CHANNEL_PACKET_SIZE = 65000;
 enum class channel_type : uint16_t
 {
     RELIABLE_ORDERED_CHANNEL = 0,
@@ -28,7 +35,12 @@ static std::uniform_int_distribution<uint64_t> &get_uid_distribution()
     return distribution;
 }
 
-inline uint64_t get_random_channel_id()
+inline channel_id get_random_channel_id()
+{
+    return get_uid_distribution()(get_rng());
+}
+
+inline client_id get_random_client_id()
 {
     return get_uid_distribution()(get_rng());
 }
@@ -37,8 +49,3 @@ inline uint64_t get_random_uint64_t()
 {
     return get_uid_distribution()(get_rng());
 }
-
-using channel_id = uint64_t;
-using client_id = uint64_t;
-inline constexpr channel_id INVALID_CHANNEL_ID = 0;
-inline constexpr client_id INVALID_CLIENT_ID = 0;

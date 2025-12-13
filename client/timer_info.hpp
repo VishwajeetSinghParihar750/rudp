@@ -2,35 +2,51 @@
 
 #include <chrono>
 #include <iostream>
+#include <functional>
 
-using Clock = std::chrono::steady_clock;
-using TimePoint = Clock::time_point;
-using Duration = std::chrono::milliseconds;
+using clock = std::chrono::steady_clock;
+using timepoint = clock::time_point;
+using duration_ms = std::chrono::milliseconds;
 
-struct timer_info
+class timer_info
 {
-    TimePoint expiration_time;
+public:
+    using callback = std::function<void()>;
+    using timer_id = uint64_t;
 
-    timer_info(Duration timeout)
-        : expiration_time(Clock::now() + timeout) {}
+private:
+    timer_id id;
+    timepoint expiration_time;
+    callback on_expire;
 
-    timer_info(TimePoint expiration)
-        : expiration_time(expiration) {}
-
-    timer_info() : expiration_time(TimePoint::max()) {}
+public:
+    timer_info(timer_id id_, duration_ms timeout_in_ms, callback on_expire_)
+        : id(id_), expiration_time(clock::now() + timeout_in_ms), on_expire(on_expire_) {}
 
     bool has_expired() const
     {
-        return Clock::now() >= expiration_time;
+        return clock::now() >= expiration_time;
     }
 
-    Duration time_remaining() const
+    void execute_on_expire_callback()
     {
-        TimePoint now = Clock::now();
+        on_expire();
+    }
+
+    duration_ms time_remaining_in_ms() const
+    {
+        timepoint now = clock::now();
         if (now >= expiration_time)
         {
-            return Duration(0);
+            return duration_ms(0);
         }
-        return std::chrono::duration_cast<Duration>(expiration_time - now);
+        return std::chrono::duration_cast<duration_ms>(expiration_time - now);
     }
+
+    bool operator<(const timer_info &other) const
+    {
+        return expiration_time < other.expiration_time;
+    }
+
+    timer_id get_id() const { return id; }
 };
