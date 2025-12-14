@@ -1,8 +1,8 @@
 #pragma once
 #include <memory>
+#include "types.hpp"
 
 class rudp_protocol_packet;
-class client_id;
 
 class i_session_control_callback
 {

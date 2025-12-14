@@ -11,9 +11,10 @@
 #include <thread>
 #include <string.h>
 #include <utility>
+#include <chrono>
 
+#include "types.hpp"
 #include "thread_safe_unordered_set.hpp"
-#include "timer_info.hpp"
 #include "i_channel.hpp"
 #include "udp.hpp"
 #include "rudp_protocol.hpp"
@@ -23,7 +24,7 @@
 #include "i_session_control_callback.hpp"
 #include "thread_safe_priority_queue.hpp"
 #include "i_channel_manager_callback.hpp"
-#include "types.hpp"
+#include "timer_manager.hpp"
 
 struct rcv_ready_queue_info
 {
@@ -44,60 +45,9 @@ class channel_manager : public i_server, public i_session_control_callback
 
     std::shared_ptr<thread_safe_priority_queue<rcv_ready_queue_info, std::vector<rcv_ready_queue_info>, std::greater<rcv_ready_queue_info>>> ready_to_rcv_queue;
 
-    using timer_info_ptr = std::shared_ptr<timer_info>;
-    struct timer_info_ptr_compare
-    {
-        bool operator()(const timer_info_ptr &a, const timer_info_ptr &b) const
-        {
-            return *b < *a;
-        }
-    };
-    thread_safe_priority_queue<timer_info_ptr, std::vector<timer_info_ptr>, timer_info_ptr_compare> timers;
-
+    std::shared_ptr<timer_manager> global_timers_manager;
     std::unordered_map<channel_id, channel_type> channels;
     std::unordered_map<client_id, std::unordered_map<channel_id, std::unique_ptr<i_channel>>> per_client_channels;
-
-    std::jthread timers_event_loop_thread;
-    void timers_event_loop(std::stop_token token)
-    {
-        timer_info_ptr cur_timer_ptr = nullptr;
-
-        while (!token.stop_requested())
-        {
-
-            bool status = timers.wait_for_and_top(cur_timer_ptr, duration_ms(100));
-
-            if (!status)
-                continue;
-
-            if (token.stop_requested())
-                return;
-
-            /*
-             * !!! CONCURRENCY ANNOTATION / FLOW CONTROL RELIANCE !!!
-             * * This logic relies on the following two assumptions for correctness:
-             * * 1. ATOMICITY ASSUMPTION: The check (timers.top) and the removal (timers.pop)
-             * are NOT atomic. A race condition is possible between the two calls.
-             * 2. FUNCTIONAL ASSUMPTION: We rely on the property that IF the timer we check (A)
-             * has expired, THEN the highest-priority timer (B) that may have been
-             * pushed during the race is ALSO expired.
-             * * RATIONALE: We skip the logic to verify the popped item matches the peeked item.
-             * If the queue is raced, the highest priority item (B) is processed, and the
-             * peeked item (A) is left in the queue for the next iteration.
-             * * WARNING: DO NOT ADD ANY TIME-CONSUMING OR LOCK-RELEASING OPERATION HERE.
-             * The correct, robust fix is to use timers.pop_if_expired() if you want specific other functionality ( implement it urself ).
-             */
-
-            // even if something new got added, its expiration must be smaller to come in front
-            if (cur_timer_ptr->has_expired())
-            {
-                cur_timer_ptr = timers.wait_and_pop();
-                cur_timer_ptr->execute_on_expire_callback();
-            }
-            else
-                std::this_thread::sleep_for(std::min(duration_ms(10), cur_timer_ptr->time_remaining_in_ms()));
-        }
-    }
 
     void serialize_channel_manager_header(rudp_protocol_packet &pkt, const rudp_protocol::channel_manager_header &c_header)
     {
@@ -135,12 +85,7 @@ class channel_manager : public i_server, public i_session_control_callback
         {
             auto ch = std::make_unique<reliable_ordered_channel>(ch_id);
 
-            ch->set_timer_allocator([this](duration_ms timeout, timer_info::callback cb) -> timer_info_ptr
-                                    {
-                auto id = get_random_uint64_t();
-                auto t = std::make_shared<timer_info>(id, timeout, cb);
-                timers.push(t); 
-            return t; });
+            ch->set_timer_manager(global_timers_manager);
 
             ch->set_on_app_data_ready([this, cl_id, ch_id]()
                                       {
@@ -216,12 +161,6 @@ public:
         return cur_channel->write_bytes_from_application(buf, len);
     }
 
-    void start_server() override
-    {
-        timers_event_loop_thread = (std::jthread([this](std::stop_token token)
-                                                 { this->timers_event_loop(std::move(token)); }));
-    }
-
     // for i session control
 
     void on_transport_receive(const client_id &cl_id, std::unique_ptr<rudp_protocol_packet> pkt) override
@@ -242,7 +181,7 @@ public:
     {
         per_client_channels.erase(cl_id);
     }
-
+    void set_timer_manager(std::shared_ptr<timer_manager> timer_man) { global_timers_manager = timer_man; }
     void set_session_control(std::shared_ptr<i_channel_manager_callback> ses_control)
     {
         session_control_ = ses_control;

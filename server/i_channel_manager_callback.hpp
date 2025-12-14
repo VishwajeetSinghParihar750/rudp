@@ -1,7 +1,7 @@
 #pragma once
 #include <memory>
+#include "types.hpp"
 
-class client_id;
 class rudp_protocol_packet;
 
 class i_channel_manager_callback

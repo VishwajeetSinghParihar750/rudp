@@ -3,24 +3,24 @@
 #include <unordered_map>
 #include <memory>
 
-#include "types.hpp"
+#include <atomic>
+
 #include "rudp_protocol_packet.hpp"
 #include "i_udp_callback.hpp"
 #include "i_session_control_callback.hpp"
 #include "i_channel_manager_callback.hpp"
 #include "transport_addr.hpp"
+#include "rudp_protocol.hpp"
+#include "timer_manager.hpp"
+#include "types.hpp"
 
 enum class CONNECTION_STATE
 {
     CLOSED,
     LISTEN,
-    SYN_RCVD,
     ESTABLISHED,
     CLOSE_WAIT,
     LAST_ACK,
-    FIN_WAIT1,
-    FIN_WAIT2,
-    CLOSING,
     TIME_WAIT
 };
 enum class CONTROL_PACKET_HEADER_FLAGS : uint8_t
@@ -31,153 +31,185 @@ enum class CONTROL_PACKET_HEADER_FLAGS : uint8_t
     FIN = (1 << 3),
 };
 
-struct connection_state_machine
+struct connection_state_machine : public std::enable_shared_from_this<connection_state_machine>
 {
-    CONNECTION_STATE current_state = CONNECTION_STATE::LISTEN;
+    static constexpr uint32_t ROUND_TRIP_TIME = 2000; // ℹ️ NEED TO KNOWx`
+
+    std::atomic<CONNECTION_STATE> current_state = CONNECTION_STATE::LISTEN;
+
+    std::function<void(uint8_t)> on_send_control_packet_to_transport;
+    std::shared_ptr<timer_manager> global_timer_manager;
+
+    connection_state_machine(std::function<void(uint8_t)> f, std::shared_ptr<timer_manager> timer_man)
+        : current_state(CONNECTION_STATE::LISTEN), on_send_control_packet_to_transport(f), global_timer_manager(timer_man) {}
 
     struct fsm_result
     {
-        uint8_t response_flags = 0;
         bool close_connection = false;
     };
 
-    uint8_t get_ack_flag() const
+    struct to_send_response
     {
-        return static_cast<uint8_t>(CONTROL_PACKET_HEADER_FLAGS ::ACK);
+        uint8_t response_flags = 0;
+        bool to_send = false;
+    };
+
+    to_send_response last_response;
+    TimerInfoTimePoint last_ack_send_time;
+
+    void set_last_ack_sent_time()
+    {
+        last_ack_send_time = std::chrono::steady_clock::now();
     }
 
-    uint8_t get_rst_flag() const
+    to_send_response get_to_send_response()
     {
-        return static_cast<uint8_t>(CONTROL_PACKET_HEADER_FLAGS::RST);
+        auto toret = last_response;
+        last_response.to_send = false;
+
+        if (toret.response_flags & (get_ack_flag()))
+            set_last_ack_sent_time();
+
+        return toret;
     }
 
-    uint8_t get_fin_flag() const
+    void send_response_to_network_without_piggybacking()
     {
-        return static_cast<uint8_t>(CONTROL_PACKET_HEADER_FLAGS::FIN);
+        if (last_response.to_send)
+        {
+            if (last_response.response_flags & (get_ack_flag()))
+                set_last_ack_sent_time();
+
+            on_send_control_packet_to_transport(last_response.response_flags);
+            last_response.to_send = false;
+        }
     }
+
+    uint8_t get_ack_flag() const { return static_cast<uint8_t>(CONTROL_PACKET_HEADER_FLAGS::ACK); }
+    uint8_t get_rst_flag() const { return static_cast<uint8_t>(CONTROL_PACKET_HEADER_FLAGS::RST); }
+    uint8_t get_fin_flag() const { return static_cast<uint8_t>(CONTROL_PACKET_HEADER_FLAGS::FIN); }
+    uint8_t get_syn_flag() const { return static_cast<uint8_t>(CONTROL_PACKET_HEADER_FLAGS::SYN); }
 
     fsm_result close()
     {
-        if (current_state == CONNECTION_STATE::SYN_RCVD)
+        if (current_state.load() == CONNECTION_STATE::ESTABLISHED)
         {
-            current_state = CONNECTION_STATE::CLOSED;
-            return {get_rst_flag(), true};
+            current_state.store(CONNECTION_STATE::LAST_ACK);
+
+            last_response = {get_fin_flag(), true};
+            send_response_to_network_without_piggybacking();
+
+            std::weak_ptr<connection_state_machine> self_weak_ptr = shared_from_this();
+
+            std::function<void()> cb = [self_weak_ptr, cb]() -> void
+            {
+                auto sp = self_weak_ptr.lock();
+                if (sp == nullptr)
+                    return;
+
+                if (sp->current_state.load() == CONNECTION_STATE::LAST_ACK)
+                {
+                    sp->last_response = {sp->get_fin_flag(), true};
+                    sp->send_response_to_network_without_piggybacking();
+
+                    sp->global_timer_manager->add_timer(std::make_unique<timer_info>(duration_ms(ROUND_TRIP_TIME * 2), cb));
+                }
+            };
+
+            global_timer_manager->add_timer(
+                std::make_unique<timer_info>(
+                    duration_ms(ROUND_TRIP_TIME * 2), cb));
+
+            return {false};
         }
-        else if (current_state == CONNECTION_STATE::ESTABLISHED)
-        {
-            current_state = CONNECTION_STATE::FIN_WAIT1;
-            return {get_fin_flag(), false};
-        }
-        else if (current_state == CONNECTION_STATE::CLOSE_WAIT)
-        {
-            current_state = CONNECTION_STATE::LAST_ACK;
-            return {get_fin_flag(), false};
-        }
-        return {0, false};
+
+        current_state.store(CONNECTION_STATE::CLOSED);
+        return {true};
     }
 
     fsm_result handle_change(uint8_t rcvd_flags)
     {
+        if (last_response.to_send)
+        {
+            return {false};
+        }
+
         if (rcvd_flags & get_rst_flag())
         {
-            if (current_state != CONNECTION_STATE::LISTEN && current_state != CONNECTION_STATE::CLOSED)
-            {
-                current_state = CONNECTION_STATE::CLOSED;
-                return {0, true};
-            }
-            return {0, false};
+            current_state.store(CONNECTION_STATE::CLOSED);
+            return {true};
         }
 
-        switch (current_state)
+        switch (current_state.load())
         {
         case CONNECTION_STATE::LISTEN:
-        {
-            if (rcvd_flags == static_cast<uint8_t>(CONTROL_PACKET_HEADER_FLAGS::SYN))
+            if (rcvd_flags == get_syn_flag())
             {
-                current_state = CONNECTION_STATE::SYN_RCVD;
-                return {get_ack_flag(), false};
+                current_state.store(CONNECTION_STATE::ESTABLISHED);
+                last_response = {get_ack_flag(), true};
             }
-            else
+            break;
+
+        case CONNECTION_STATE::ESTABLISHED:
+            if (rcvd_flags == get_fin_flag())
             {
-                return {get_rst_flag(), false};
+                current_state.store(CONNECTION_STATE::TIME_WAIT);
+
+                last_response = {get_ack_flag(), true};
+                send_response_to_network_without_piggybacking();
+
+                std::weak_ptr<connection_state_machine> this_weak_ptr = shared_from_this();
+                std::function<void()> cb = [this_weak_ptr, cb] -> void
+                {
+                    auto sp = this_weak_ptr.lock();
+                    if (sp == nullptr)
+                        return;
+
+                    duration_ms time_spent = std::chrono::duration_cast<duration_ms>(std::chrono::steady_clock::now() - sp->last_ack_send_time);
+                    if (time_spent < duration_ms(connection_state_machine::ROUND_TRIP_TIME * 2))
+                    {
+                        sp->last_response = {sp->get_ack_flag(), true};
+                        sp->send_response_to_network_without_piggybacking();
+                        sp->global_timer_manager->add_timer(std::make_unique<timer_info>(duration_ms(connection_state_machine::ROUND_TRIP_TIME * 2), cb));
+                    }
+                    else
+                    {
+                        sp->current_state.store(CONNECTION_STATE::CLOSED);
+                    }
+                };
+
+                global_timer_manager->add_timer(std::make_unique<timer_info>(duration_ms(connection_state_machine::ROUND_TRIP_TIME * 2), cb));
             }
+            else if (rcvd_flags == get_syn_flag())
+            {
+                // means ack got lost for clients syn
+                last_response = {get_ack_flag(), true};
+            }
+
+            break;
+
+        case CONNECTION_STATE::TIME_WAIT:
+            if (rcvd_flags == get_fin_flag())
+            {
+                // means ack got lost for fin
+                last_response = {get_ack_flag(), true};
+                send_response_to_network_without_piggybacking();
+            }
+            break;
+
+        case CONNECTION_STATE::LAST_ACK:
+            if (rcvd_flags == get_ack_flag())
+            {
+                current_state.store(CONNECTION_STATE::CLOSED);
+                return {true};
+            }
+            break;
+
+        default:
+            break;
         }
 
-        case CONNECTION_STATE::SYN_RCVD:
-        {
-            if (rcvd_flags & get_rst_flag())
-            {
-                current_state = CONNECTION_STATE::CLOSED;
-                return {0, true};
-            }
-            else if (rcvd_flags == get_ack_flag())
-            {
-                current_state = CONNECTION_STATE::ESTABLISHED;
-                return {0, false};
-            }
-            else
-            {
-                return {get_rst_flag(), false};
-            }
-        }
-        case CONNECTION_STATE::ESTABLISHED:
-        {
-            if (rcvd_flags == get_fin_flag())
-            {
-                current_state = CONNECTION_STATE::CLOSE_WAIT;
-                return {get_ack_flag(), false};
-            }
-            return {0, false};
-        }
-        case CONNECTION_STATE::LAST_ACK:
-        {
-            if (rcvd_flags == get_ack_flag())
-            {
-                current_state = CONNECTION_STATE::CLOSED;
-                return {0, true};
-            }
-            return {0, false};
-        }
-        case CONNECTION_STATE::FIN_WAIT1:
-        {
-            if (rcvd_flags == get_ack_flag())
-            {
-                current_state = CONNECTION_STATE::FIN_WAIT2;
-                return {0, false};
-            }
-            else if (rcvd_flags == get_fin_flag())
-            {
-                current_state = CONNECTION_STATE::CLOSING;
-                return {get_ack_flag(), false};
-            }
-            else if (rcvd_flags == (get_fin_flag() | get_ack_flag()))
-            {
-                current_state = CONNECTION_STATE::TIME_WAIT;
-                return {get_ack_flag(), false};
-            }
-            return {0, false};
-        }
-        case CONNECTION_STATE::FIN_WAIT2:
-        {
-            if (rcvd_flags == get_fin_flag())
-            {
-                current_state = CONNECTION_STATE::TIME_WAIT;
-                return {get_ack_flag(), false};
-            }
-            return {0, false};
-        }
-        case CONNECTION_STATE::CLOSING:
-        {
-            if (rcvd_flags == get_ack_flag())
-            {
-                current_state = CONNECTION_STATE::TIME_WAIT;
-                return {0, false};
-            }
-            return {0, false};
-        }
-        default:
-            return {0, false};
-        }
+        return {false};
     }
 };
 
@@ -188,28 +220,79 @@ class session_control : public i_udp_callback, public i_channel_manager_callback
     std::weak_ptr<i_session_control_callback> channel_manager_ptr;
     std::unordered_map<transport_addr, client_id, transport_addr_hasher> clients_addr_to_id;
     std::unordered_map<client_id, transport_addr> clients_id_to_addr;
-    std::unordered_map<client_id, std::unique_ptr<connection_state_machine>> clients_fsm;
+    std::unordered_map<client_id, std::shared_ptr<connection_state_machine>> clients_fsm;
 
-    void add_control_header(const client_id &cl_id, const rudp_protocol_packet &pkt)
+    void add_session_control_header(const client_id &cl_id, rudp_protocol_packet &pkt)
     {
+        connection_state_machine::to_send_response res = clients_fsm[cl_id]->get_to_send_response();
+        rudp_protocol::session_control_header header;
+        header.flags = 0, header.reserved = 0;
+
+        if (res.to_send)
+            header.flags |= res.response_flags;
+
+        header.reserved = htonl(header.reserved);
+        //
+        memcpy(pkt.get_buffer() + rudp_protocol_packet::SESSION_CONTROL_HEADER_OFFSET, &header.flags, sizeof(header.flags));
+        memcpy(pkt.get_buffer() + rudp_protocol_packet::SESSION_CONTROL_HEADER_OFFSET + sizeof(header.flags), &header.reserved, sizeof(header.reserved));
     }
 
-    bool verify_can_send_data(const client_id &cl_id) {}
-
-    void on_transport_send_control_packet()
+    bool verify_can_exchange_data(const client_id &cl_id)
     {
+        return clients_fsm.contains(cl_id) && clients_fsm[cl_id]->current_state.load() == CONNECTION_STATE::ESTABLISHED;
     }
 
-    void parse_session_control_packet_header(const rudp_protocol_packet &incoming_pkt)
+    void parse_session_control_packet_header(const rudp_protocol_packet &incoming_pkt, const transport_addr &source_addr)
     {
+        uint8_t flags = *reinterpret_cast<uint8_t *>(incoming_pkt.get_const_buffer() + rudp_protocol_packet::SESSION_CONTROL_HEADER_OFFSET);
+        uint32_t reserved = *reinterpret_cast<uint8_t *>(incoming_pkt.get_const_buffer() + rudp_protocol_packet::SESSION_CONTROL_HEADER_OFFSET + sizeof(flags));
+        reserved = ntohl(reserved);
 
-        // set current header
+        if (!clients_addr_to_id.contains(source_addr))
+        {
+            client_id cl_id;
+            while (true)
+            {
+                cl_id = get_random_client_id();
+                if (!clients_id_to_addr.contains(cl_id) && !(cl_id == INVALID_CLIENT_ID))
+                {
+                    break;
+                }
+            }
+            create_fsm_for_client(cl_id, source_addr);
+            connection_state_machine::fsm_result res = clients_fsm[cl_id]->handle_change(flags & ((uint8_t(1) << 4) - 1));
+
+            if (res.close_connection)
+                clients_fsm.erase(cl_id);
+            else
+            {
+                clients_addr_to_id.emplace(source_addr, cl_id);
+                clients_id_to_addr.emplace(cl_id, source_addr);
+            }
+        }
+        else
+        {
+            client_id cl_id = clients_addr_to_id[source_addr];
+            connection_state_machine::fsm_result res = clients_fsm[cl_id]->handle_change(flags & ((uint8_t(1) << 4) - 1));
+            if (res.close_connection)
+            {
+                clients_addr_to_id.erase(source_addr);
+                clients_id_to_addr.erase(cl_id);
+                clients_fsm.erase(cl_id);
+            }
+        }
     }
 
-    bool verify_can_receive_data() {}
-
-    void send_incoming_packet_to_channel_mananger(std::unique_ptr<rudp_protocol_packet> incoming_pkt)
+    void create_fsm_for_client(const client_id &cl_id, const transport_addr &source_addr)
     {
+        clients_fsm.emplace(cl_id, std::make_shared<connection_state_machine>([source_addr, this](uint8_t fsm_flags)
+                                                                              {
+                                                                                  char buf[rudp_protocol::SESSION_CONTROL_HEADER_SIZE];
+
+                                                                                  memcpy(buf, &fsm_flags, sizeof(fsm_flags));
+                                                                                  // here we culd have more of stuff as session control if we wanna add 
+
+                                                                                  this->udp_ptr->send_packet_to_network(source_addr, buf, sizeof(buf)) ; }));
     }
 
 public:
@@ -217,7 +300,6 @@ public:
     {
         udp_ptr = udp_ptr_;
     }
-
     void set_channel_manager(std::weak_ptr<i_session_control_callback> channel_manager_)
     {
         channel_manager_ptr = channel_manager_;
@@ -225,28 +307,20 @@ public:
 
     void on_transport_receive(std::unique_ptr<rudp_protocol_packet> pkt, std::unique_ptr<transport_addr> source_addr) override
     {
-        parse_session_control_packet_header(*pkt);
+        parse_session_control_packet_header(*pkt, *source_addr);
 
-        if (verify_can_receive_data())
-        {
-            auto it = clients_addr_to_id.find(*source_addr);
+        auto it = clients_addr_to_id.find(*source_addr);
 
-            if (it != clients_addr_to_id.end())
-            {
-                if (auto cm_sp = channel_manager_ptr.lock())
-                {
-                    cm_sp->on_transport_receive(it->second, std::move(pkt));
-                }
-            }
-        }
+        if (it != clients_addr_to_id.end() && verify_can_exchange_data(it->second))
+            if (auto cm_sp = channel_manager_ptr.lock())
+                cm_sp->on_transport_receive(it->second, std::move(pkt));
     }
 
     void on_transport_send_data(const client_id &cl_id, std::unique_ptr<rudp_protocol_packet> pkt) override
     {
-
-        if (verify_can_send_data(cl_id))
+        if (verify_can_exchange_data(cl_id))
         {
-            add_control_header(cl_id, *pkt);
+            add_session_control_header(cl_id, *pkt);
             udp_ptr->send_packet_to_network(clients_id_to_addr[cl_id], pkt->get_buffer(), pkt->get_length());
         }
     }

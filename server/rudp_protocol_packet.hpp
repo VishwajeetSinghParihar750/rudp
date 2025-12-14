@@ -12,6 +12,12 @@ class rudp_protocol_packet : public i_packet
     char *mem;
 
 public:
+    static constexpr size_t SESSION_CONTROL_HEADER_OFFSET = 0;
+    static constexpr size_t SESSION_CONTROL_HEADER_SIZE = 5;
+    static constexpr size_t CHANNEL_MANAGER_HEADER_OFFEST = 5;
+    static constexpr size_t CHANNEL_MANAGER_HEADER_SIZE = 4;
+    static constexpr size_t CHANNEL_HEADER_OFFSET = 9;
+
     rudp_protocol_packet() = default;
 
     rudp_protocol_packet(size_t n)

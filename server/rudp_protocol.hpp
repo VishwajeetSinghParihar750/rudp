@@ -2,14 +2,18 @@
 
 // out one packet will be at max 16 bits, coz udp
 #include <unistd.h>
+#include <inttypes.h>
+#include <arpa/inet.h>
+
 #include "types.hpp"
 
 namespace rudp_protocol
 {
+
     struct channel_manager_header
     {
         channel_id ch_id;
-        channel_manager_header(channel_id id) : ch_id(id) {}
+        channel_manager_header(const channel_id &id) : ch_id(id) {}
     };
     struct session_control_header
     {

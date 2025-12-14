@@ -12,16 +12,14 @@ class timer_info
 {
 public:
     using callback = std::function<void()>;
-    using timer_id = uint64_t;
 
 private:
-    timer_id id;
     TimerInfoTimePoint expiration_time;
     callback on_expire;
 
 public:
-    timer_info(timer_id id_, duration_ms timeout_in_ms, callback on_expire_)
-        : id(id_), expiration_time(TimerInfoClock::now() + timeout_in_ms), on_expire(on_expire_) {}
+    timer_info(duration_ms timeout_in_ms, callback on_expire_)
+        : expiration_time(TimerInfoClock::now() + timeout_in_ms), on_expire(on_expire_) {}
 
     bool has_expired() const
     {
@@ -47,6 +45,4 @@ public:
     {
         return expiration_time < other.expiration_time;
     }
-
-    timer_id get_id() const { return id; }
 };

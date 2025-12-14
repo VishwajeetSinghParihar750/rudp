@@ -13,10 +13,9 @@
 #include <sys/socket.h>
 #include "sys/ioctl.h"
 
-#include "types.hpp"
 #include "i_udp_callback.hpp"
+#include "rudp_protocol_packet.hpp"
 #include "transport_addr.hpp"
-#include "wrapper_sockaddr.hpp"
 
 class udp
 {

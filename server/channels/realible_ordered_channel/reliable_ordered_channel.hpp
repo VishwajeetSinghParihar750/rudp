@@ -2,6 +2,10 @@
 
 #include "../../i_channel.hpp"
 #include "../../rudp_protocol_packet.hpp"
+#include "../../rudp_protocol.hpp"
+#include "../../types.hpp"
+#include "../../timer_info.hpp"
+#include "../../timer_manager.hpp"
 #include <map>
 #include <deque>
 #include <cstring>
@@ -482,14 +486,7 @@ private:
     std::function<void()> on_app_data_ready;
     std::function<void(std::unique_ptr<rudp_protocol_packet>)> on_net_data_ready;
 
-    timer_allocator_t timer_allocator_ = nullptr;
-
-    // === Timer IDs and State ===
-    std::atomic<uint64_t> rto_timer_id{0};         // Retransmission timeout
-    std::atomic<uint64_t> keepalive_timer_id{0};   // Keep-alive timer
-    std::atomic<uint64_t> delayed_ack_timer_id{0}; // Delayed ACK timer
-    std::atomic<uint64_t> fin_wait_timer_id{0};    // FIN wait timer
-    std::atomic<bool> is_closing{false};           // Graceful close state
+    std::shared_ptr<timer_manager> global_timer_manager;
 
     // === Timer Configuration ===
     static constexpr uint64_t KEEPALIVE_INTERVAL_MS = 30000; // 30 seconds
@@ -500,8 +497,9 @@ private:
     void on_rto_expire()
     {
         // Retransmission timeout: trigger immediate send
-        // if (on_net_data_ready)
-        //     on_net_data_ready();
+        auto pkt = on_transport_send();
+        if (pkt && on_net_data_ready)
+            on_net_data_ready(std::move(pkt));
 
         // Reschedule RTO
         schedule_rto_timer();
@@ -511,8 +509,9 @@ private:
     {
         // Send keepalive ACK if no data in flight
         flags.set_send_ack(true);
-        // if (on_net_data_ready)
-        //     on_net_data_ready();
+        auto pkt = on_transport_send();
+        if (pkt && on_net_data_ready)
+            on_net_data_ready(std::move(pkt));
 
         // Reschedule keepalive
         schedule_keepalive_timer();
@@ -521,121 +520,81 @@ private:
     void on_delayed_ack_expire()
     {
         // Flush pending ACK
-        // if (rcv_window.is_ack_pending())
-        // {
-        //     if (on_net_data_ready)
-        //         on_net_data_ready();
-        // }
+        if (rcv_window.is_ack_pending())
+        {
+            auto pkt = on_transport_send();
+            if (pkt && on_net_data_ready)
+                on_net_data_ready(std::move(pkt));
+        }
     }
 
     void on_fin_wait_expire()
     {
         // FIN wait timeout: force close
-        is_closing.store(false, std::memory_order_release);
+        // Connection cleanup handled by channel_manager
     }
 
     // === Timer Scheduling ===
     void schedule_rto_timer()
     {
-        if (!timer_allocator_)
+        if (!global_timer_manager)
             return;
 
         auto cb = [this]()
         { this->on_rto_expire(); };
-        timer_info_ptr t = timer_allocator_(duration_ms(ordered_channel_config::RTO_MS), cb);
-        if (t)
-            rto_timer_id.store(t->get_id(), std::memory_order_release);
+        auto timer = std::make_unique<timer_info>(duration_ms(ordered_channel_config::RTO_MS), cb);
+        global_timer_manager->add_timer(duration_ms(ordered_channel_config::RTO_MS), std::move(timer));
     }
 
     void schedule_keepalive_timer()
     {
-        if (!timer_allocator_)
+        if (!global_timer_manager)
             return;
 
         auto cb = [this]()
         { this->on_keepalive_expire(); };
-        timer_info_ptr t = timer_allocator_(duration_ms(KEEPALIVE_INTERVAL_MS), cb);
-        if (t)
-            keepalive_timer_id.store(t->get_id(), std::memory_order_release);
+        auto timer = std::make_unique<timer_info>(duration_ms(KEEPALIVE_INTERVAL_MS), cb);
+        global_timer_manager->add_timer(duration_ms(KEEPALIVE_INTERVAL_MS), std::move(timer));
     }
 
     void schedule_delayed_ack_timer()
     {
-        if (!timer_allocator_)
-            return;
-
-        // Only schedule if one isn't already active
-        if (delayed_ack_timer_id.load(std::memory_order_acquire) != 0)
+        if (!global_timer_manager)
             return;
 
         auto cb = [this]()
         { this->on_delayed_ack_expire(); };
-        timer_info_ptr t = timer_allocator_(duration_ms(DELAYED_ACK_MS), cb);
-        if (t)
-            delayed_ack_timer_id.store(t->get_id(), std::memory_order_release);
+        auto timer = std::make_unique<timer_info>(duration_ms(DELAYED_ACK_MS), cb);
+        global_timer_manager->add_timer(duration_ms(DELAYED_ACK_MS), std::move(timer));
     }
 
     void schedule_fin_wait_timer()
     {
-        if (!timer_allocator_)
+        if (!global_timer_manager)
             return;
 
         auto cb = [this]()
         { this->on_fin_wait_expire(); };
-        timer_info_ptr t = timer_allocator_(duration_ms(FIN_WAIT_MS), cb);
-        if (t)
-            fin_wait_timer_id.store(t->get_id(), std::memory_order_release);
+        auto timer = std::make_unique<timer_info>(duration_ms(FIN_WAIT_MS), cb);
+        global_timer_manager->add_timer(duration_ms(FIN_WAIT_MS), std::move(timer));
     }
 
 public:
     explicit reliable_ordered_channel(channel_id id) : ch_id(id) {}
-
-    channel_id get_channel_id() const override { return ch_id; }
 
     std::unique_ptr<i_channel> clone() const override
     {
         return std::make_unique<reliable_ordered_channel>(*this);
     }
 
-    channel_setup_info get_channel_setup_info() override
+    void on_transport_receive(std::unique_ptr<rudp_protocol_packet> pkt) override
     {
-        channel_setup_info info;
-        info.ch_id = ch_id;
-
-        auto payload = std::make_unique<rudp_protocol_packet>(6);
-        char *buf = payload->get_buffer();
-
-        uint32_t init_seq = htonl(rcv_window.get_initial_seq_no());
-        uint16_t init_win = htons(rcv_window.get_window_size());
-
-        memcpy(buf + 0, &init_seq, 4);
-        memcpy(buf + 4, &init_win, 2);
-
-        payload->set_length(6);
-        info.payload = std::move(payload);
-
-        return info;
-    }
-
-    void process_channel_setup_info(channel_setup_info setup) override
-    {
-        if (!setup.payload || setup.payload->get_length() < 6)
+        if (!pkt)
             return;
 
-        const char *buf = setup.payload->get_buffer();
-        uint32_t remote_init_seq = ntohl(*reinterpret_cast<const uint32_t *>(buf + 0));
-        uint16_t remote_init_win = ntohs(*reinterpret_cast<const uint16_t *>(buf + 4));
+        const char *ibuf = pkt->get_buffer();
+        uint32_t sz = pkt->get_length();
 
-        rcv_window.set_initial_seq_no(remote_init_seq);
-        snd_window.process_window_update(remote_init_win);
-
-        // Start timers after channel setup
-        schedule_rto_timer();
-        schedule_keepalive_timer();
-    }
-
-    void on_transport_receive(const char *ibuf, const uint32_t &sz) override
-    {
         channel_header header{};
         if (!rcv_window.receive_packet(ibuf, sz, header))
             return;
@@ -651,13 +610,17 @@ public:
             on_app_data_ready();
 
         // Schedule delayed ACK on data receipt
-        // if (payload_len > 0 && rcv_window.is_ack_pending())
-        //     schedule_delayed_ack_timer();
-        // else if (rcv_window.is_ack_pending() && on_net_data_ready)
-        //     on_net_data_ready();
+        if (payload_len > 0 && rcv_window.is_ack_pending())
+            schedule_delayed_ack_timer();
+        else if (rcv_window.is_ack_pending())
+        {
+            auto pkt_to_send = on_transport_send();
+            if (pkt_to_send && on_net_data_ready)
+                on_net_data_ready(std::move(pkt_to_send));
+        }
     }
 
-    std::unique_ptr<i_packet> on_transport_send() override
+    std::unique_ptr<rudp_protocol_packet> on_transport_send() override
     {
         uint32_t seq_no = 0;
         char payload_buf[ordered_channel_config::MAX_MSS];
@@ -710,10 +673,14 @@ public:
 
     ssize_t write_bytes_from_application(const char *buf, const uint32_t &len) override
     {
-        // ssize_t written = snd_window.write_data(buf, len);
-        // if (written > 0 && on_net_data_ready)
-        //     on_net_data_ready();
-        // return written;
+        ssize_t written = snd_window.write_data(buf, len);
+        if (written > 0)
+        {
+            auto pkt = on_transport_send();
+            if (pkt && on_net_data_ready)
+                on_net_data_ready(std::move(pkt));
+        }
+        return written;
     }
 
     void set_on_app_data_ready(std::function<void()> f) override
@@ -726,15 +693,8 @@ public:
         on_net_data_ready = f;
     }
 
-    void set_timer_allocator(timer_allocator_t allocator) override
+    void set_timer_manager(std::shared_ptr<timer_manager> timer_man) override
     {
-        timer_allocator_ = std::move(allocator);
-    }
-
-    timer_info_ptr create_timer(duration_ms timeout, timer_callback cb)
-    {
-        if (!timer_allocator_)
-            return nullptr;
-        return timer_allocator_(timeout, cb);
+        global_timer_manager = timer_man;
     }
 };
