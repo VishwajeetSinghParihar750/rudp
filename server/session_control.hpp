@@ -111,10 +111,10 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
 
             std::weak_ptr<connection_state_machine> self_weak_ptr = shared_from_this();
 
-            std::function<void()> cb = [self_weak_ptr, cb]() -> void
+            std::function<void()> cb = [self_weak_ptr, cb, retries = 5]() mutable -> void
             {
                 auto sp = self_weak_ptr.lock();
-                if (sp == nullptr)
+                if (sp == nullptr or --retries == 0)
                     return;
 
                 if (sp->current_state.load() == CONNECTION_STATE::LAST_ACK)
@@ -184,10 +184,11 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
                 send_response_to_network_without_piggybacking();
 
                 std::weak_ptr<connection_state_machine> this_weak_ptr = shared_from_this();
-                std::function<void()> cb = [this_weak_ptr, cb] -> void
+
+                std::function<void()> cb = [this_weak_ptr, cb, retries = 5]() mutable -> void
                 {
                     auto sp = this_weak_ptr.lock();
-                    if (sp == nullptr)
+                    if (sp == nullptr or --retries == 0)
                         return;
 
                     duration_ms time_spent = std::chrono::duration_cast<duration_ms>(std::chrono::steady_clock::now() - sp->last_ack_send_time);

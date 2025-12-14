@@ -6,11 +6,11 @@
 #include <optional>
 #include <utility>
 
-template <typename K, typename V>
+template <typename K, typename V, typename H = std::hash<K>>
 class thread_safe_unordered_map
 {
 private:
-    std::unordered_map<K, V> map_;
+    std::unordered_map<K, V, H> map_;
     mutable std::mutex mutex_;
     std::condition_variable cv;
 
@@ -67,7 +67,8 @@ public:
     std::pair<K, V> pop()
     {
         std::unique_lock<std::mutex> lock(mutex_);
-        cv.wait(lock, [this] { return !map_.empty(); });
+        cv.wait(lock, [this]
+                { return !map_.empty(); });
 
         auto it = map_.begin();
         std::pair<K, V> result = std::make_pair(it->first, std::move(it->second));
