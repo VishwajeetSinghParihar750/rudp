@@ -26,6 +26,12 @@
 #include "i_channel_manager_callback.hpp"
 #include "timer_manager.hpp"
 
+enum class READ_FROM_CHANNEL_ERROR : ssize_t
+{
+    CLIENT_DISCONNECTED = -1,
+    NO_PENDING_DATA = -2
+
+};
 struct rcv_ready_queue_info
 {
     std::chrono::steady_clock::time_point time;
@@ -48,6 +54,8 @@ class channel_manager : public i_server, public i_session_control_callback
     std::shared_ptr<timer_manager> global_timers_manager;
     std::unordered_map<channel_id, channel_type> channels;
     std::unordered_map<client_id, std::unordered_map<channel_id, std::unique_ptr<i_channel>>> per_client_channels;
+
+    thread_safe_unordered_set<client_id> pending_disconnects;
 
     void serialize_channel_manager_header(rudp_protocol_packet &pkt, const rudp_protocol::channel_manager_header &c_header)
     {
@@ -112,9 +120,13 @@ class channel_manager : public i_server, public i_session_control_callback
         session_control_->on_transport_send_data(cl_id, std::move(pkt));
     }
 
-public:
-    channel_manager() = default;
+    void perform_final_cleanup(client_id cl_id)
+    {
+        per_client_channels.erase(cl_id);
+        session_control_->notify_removal_of_client(cl_id);
+    }
 
+public:
     // for i_server
     void add_channel(channel_id ch_id, channel_type type) override
     {
@@ -128,15 +140,32 @@ public:
         }
     }
 
+    void close_server() override
+    {
+        session_control_->on_close_server(); // now nothing should come to me from server, and if application tries to read or write after calling close, its undefined from my side
+    }
+
     ssize_t read_from_channel_nonblocking(channel_id &channel_id_, client_id &client_id_, char *buf, const size_t len) override
     {
+
+        if (pending_disconnects.size() > 0)
+        {
+            client_id_ = pending_disconnects.pop();
+            channel_id_ = INVALID_CHANNEL_ID;
+
+            return (ssize_t)READ_FROM_CHANNEL_ERROR::CLIENT_DISCONNECTED;
+        }
+
         rcv_ready_queue_info info;
         bool result = ready_to_rcv_queue->pop(info);
         if (!result)
-            return -1;
+            return (ssize_t)READ_FROM_CHANNEL_ERROR::NO_PENDING_DATA;
 
         client_id_ = info.cl_id;
         channel_id_ = info.ch_id;
+
+        if (!per_client_channels.contains(client_id_) || !per_client_channels[client_id_].contains(channel_id_))
+            return read_from_channel_nonblocking(channel_id_, client_id_, buf, len);
 
         auto &cur_channel = per_client_channels[client_id_][channel_id_];
         return cur_channel->read_bytes_to_application(buf, len);
@@ -144,13 +173,32 @@ public:
 
     ssize_t read_from_channel_blocking(channel_id &channel_id_, client_id &client_id_, char *buf, const size_t len) override
     {
-        rcv_ready_queue_info info = ready_to_rcv_queue->wait_and_pop();
+        rcv_ready_queue_info info;
 
-        client_id_ = info.cl_id;
-        channel_id_ = info.ch_id;
+        while (true)
+        {
+            if (pending_disconnects.size() > 0)
+            {
+                client_id_ = pending_disconnects.pop();
+                channel_id_ = INVALID_CHANNEL_ID;
 
-        auto &cur_channel = per_client_channels[client_id_][channel_id_];
-        return cur_channel->read_bytes_to_application(buf, len);
+                return (ssize_t)READ_FROM_CHANNEL_ERROR::CLIENT_DISCONNECTED;
+            }
+
+            auto result = ready_to_rcv_queue->wait_for_and_pop(info, duration_ms(100));
+
+            if (result)
+            {
+                client_id_ = info.cl_id;
+                channel_id_ = info.ch_id;
+
+                if (per_client_channels.contains(client_id_) && per_client_channels[client_id_].contains(channel_id_))
+                {
+                    auto &cur_channel = per_client_channels[client_id_][channel_id_];
+                    return cur_channel->read_bytes_to_application(buf, len);
+                }
+            }
+        }
     }
     ssize_t write_to_channel(const channel_id &channel_id_, const client_id &client_id_, const char *buf, const size_t len) override
     {
@@ -179,7 +227,7 @@ public:
     }
     void remove_client(const client_id &cl_id) override
     {
-        per_client_channels.erase(cl_id);
+        pending_disconnects.insert(cl_id);
     }
     void set_timer_manager(std::shared_ptr<timer_manager> timer_man) { global_timers_manager = timer_man; }
     void set_session_control(std::shared_ptr<i_channel_manager_callback> ses_control)

@@ -12,6 +12,7 @@
 #include "transport_addr.hpp"
 #include "rudp_protocol.hpp"
 #include "timer_manager.hpp"
+#include "thread_safe_unordered_map.hpp"
 #include "types.hpp"
 
 enum class CONNECTION_STATE
@@ -42,10 +43,19 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
 
     connection_state_machine(std::function<void(uint8_t)> f, std::shared_ptr<timer_manager> timer_man)
         : current_state(CONNECTION_STATE::LISTEN), on_send_control_packet_to_transport(f), global_timer_manager(timer_man) {}
+    ~connection_state_machine()
+    {
+        if (current_state.load() != CONNECTION_STATE::CLOSED)
+        {
+            last_response = {get_rst_flag(), true};
+            send_response_to_network_without_piggybacking();
+        }
+    }
 
     struct fsm_result
     {
         bool close_connection = false;
+        bool stop_data_exchange = false;
     };
 
     struct to_send_response
@@ -120,24 +130,39 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
                 std::make_unique<timer_info>(
                     duration_ms(ROUND_TRIP_TIME * 2), cb));
 
-            return {false};
+            return {false, false};
         }
 
-        current_state.store(CONNECTION_STATE::CLOSED);
-        return {true};
+        else
+        {
+            last_response = {get_rst_flag(), true};
+            send_response_to_network_without_piggybacking();
+
+            current_state.store(CONNECTION_STATE::CLOSED);
+            return {true, false};
+        }
     }
 
     fsm_result handle_change(uint8_t rcvd_flags)
     {
+
+        if (current_state.load() == CONNECTION_STATE::CLOSED)
+        {
+            last_response = {get_rst_flag(), true};
+            send_response_to_network_without_piggybacking();
+            return {false, false};
+        }
+
         if (last_response.to_send)
         {
-            return {false};
+            send_response_to_network_without_piggybacking();
+            return {false, false};
         }
 
         if (rcvd_flags & get_rst_flag())
         {
             current_state.store(CONNECTION_STATE::CLOSED);
-            return {true};
+            return {true, true};
         }
 
         switch (current_state.load())
@@ -179,6 +204,8 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
                 };
 
                 global_timer_manager->add_timer(std::make_unique<timer_info>(duration_ms(connection_state_machine::ROUND_TRIP_TIME * 2), cb));
+
+                return {false, true};
             }
             else if (rcvd_flags == get_syn_flag())
             {
@@ -201,7 +228,7 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
             if (rcvd_flags == get_ack_flag())
             {
                 current_state.store(CONNECTION_STATE::CLOSED);
-                return {true};
+                return {true, false};
             }
             break;
 
@@ -209,7 +236,7 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
             break;
         }
 
-        return {false};
+        return {false, false};
     }
 };
 
@@ -221,6 +248,33 @@ class session_control : public i_udp_callback, public i_channel_manager_callback
     std::unordered_map<transport_addr, client_id, transport_addr_hasher> clients_addr_to_id;
     std::unordered_map<client_id, transport_addr> clients_id_to_addr;
     std::unordered_map<client_id, std::shared_ptr<connection_state_machine>> clients_fsm;
+
+    thread_safe_unordered_map<client_id, std::shared_ptr<std::atomic<int>>> teardown_counter;
+
+    void perform_final_cleanup(client_id cl_id)
+    {
+        if (clients_id_to_addr.contains(cl_id))
+        {
+            auto addr = clients_id_to_addr[cl_id];
+            clients_addr_to_id.erase(addr);
+            clients_id_to_addr.erase(cl_id);
+        }
+        teardown_counter.erase(cl_id);
+        clients_fsm.erase(cl_id);
+    }
+    void trigger_teardown_step(client_id cl_id)
+    {
+        auto counter = teardown_counter.get(cl_id);
+        if (!counter)
+            return;
+
+        int previous_value = (*counter)->fetch_add(1);
+
+        if (previous_value == 1)
+        {
+            perform_final_cleanup(cl_id);
+        }
+    }
 
     void add_session_control_header(const client_id &cl_id, rudp_protocol_packet &pkt)
     {
@@ -255,9 +309,7 @@ class session_control : public i_udp_callback, public i_channel_manager_callback
             {
                 cl_id = get_random_client_id();
                 if (!clients_id_to_addr.contains(cl_id) && !(cl_id == INVALID_CLIENT_ID))
-                {
                     break;
-                }
             }
             create_fsm_for_client(cl_id, source_addr);
             connection_state_machine::fsm_result res = clients_fsm[cl_id]->handle_change(flags & ((uint8_t(1) << 4) - 1));
@@ -274,11 +326,25 @@ class session_control : public i_udp_callback, public i_channel_manager_callback
         {
             client_id cl_id = clients_addr_to_id[source_addr];
             connection_state_machine::fsm_result res = clients_fsm[cl_id]->handle_change(flags & ((uint8_t(1) << 4) - 1));
+
             if (res.close_connection)
             {
-                clients_addr_to_id.erase(source_addr);
-                clients_id_to_addr.erase(cl_id);
-                clients_fsm.erase(cl_id);
+                if (!teardown_counter.contains(cl_id))
+                    teardown_counter.insert(cl_id, std::make_shared<std::atomic<int>>(0));
+
+                trigger_teardown_step(cl_id);
+            }
+
+            if (res.stop_data_exchange)
+            {
+
+                if (auto sp = channel_manager_ptr.lock())
+                {
+                    if (!teardown_counter.contains(cl_id))
+                        teardown_counter.insert(cl_id, std::make_shared<std::atomic<int>>(0));
+
+                    sp->remove_client(cl_id);
+                }
             }
         }
     }
@@ -303,6 +369,26 @@ public:
     void set_channel_manager(std::weak_ptr<i_session_control_callback> channel_manager_)
     {
         channel_manager_ptr = channel_manager_;
+    }
+    void on_close_server() override
+    {
+
+        std::vector<client_id> to_clean_up;
+        for (auto &[cl_id, fsm] : clients_fsm)
+        {
+            connection_state_machine::fsm_result res = fsm->close();
+            if (res.close_connection)
+            {
+                to_clean_up.push_back(cl_id);
+            }
+        }
+        for (auto i : to_clean_up)
+            perform_final_cleanup(i);
+        //
+    }
+    void notify_removal_of_client(const client_id &cl_id) override
+    {
+        trigger_teardown_step(cl_id);
     }
 
     void on_transport_receive(std::unique_ptr<rudp_protocol_packet> pkt, std::unique_ptr<transport_addr> source_addr) override
