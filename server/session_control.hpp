@@ -14,6 +14,9 @@
 #include "timer_manager.hpp"
 #include "thread_safe_unordered_map.hpp"
 #include "types.hpp"
+#include <mutex>
+
+inline std::recursive_mutex g_connection_state_machine_mutex;
 
 enum class CONNECTION_STATE
 {
@@ -45,6 +48,7 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
         : current_state(CONNECTION_STATE::LISTEN), on_send_control_packet_to_transport(f), global_timer_manager(timer_man) {}
     ~connection_state_machine()
     {
+        std::lock_guard<std::recursive_mutex> lg(g_connection_state_machine_mutex);
         if (current_state.load() != CONNECTION_STATE::CLOSED)
         {
             last_response = {get_rst_flag(), true};
@@ -69,11 +73,13 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
 
     void set_last_ack_sent_time()
     {
+        std::lock_guard<std::recursive_mutex> lg(g_connection_state_machine_mutex);
         last_ack_send_time = std::chrono::steady_clock::now();
     }
 
     to_send_response get_to_send_response()
     {
+        std::lock_guard<std::recursive_mutex> lg(g_connection_state_machine_mutex);
         auto toret = last_response;
         last_response.to_send = false;
 
@@ -85,6 +91,7 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
 
     void send_response_to_network_without_piggybacking()
     {
+        std::lock_guard<std::recursive_mutex> lg(g_connection_state_machine_mutex);
         if (last_response.to_send)
         {
             if (last_response.response_flags & (get_ack_flag()))
@@ -102,6 +109,7 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
 
     fsm_result close()
     {
+        std::lock_guard<std::recursive_mutex> lg(g_connection_state_machine_mutex);
         if (current_state.load() == CONNECTION_STATE::ESTABLISHED)
         {
             current_state.store(CONNECTION_STATE::LAST_ACK);
@@ -117,18 +125,16 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
                 if (sp == nullptr or --retries == 0)
                     return;
 
+                std::lock_guard<std::recursive_mutex> lg(g_connection_state_machine_mutex);
                 if (sp->current_state.load() == CONNECTION_STATE::LAST_ACK)
                 {
                     sp->last_response = {sp->get_fin_flag(), true};
                     sp->send_response_to_network_without_piggybacking();
-
                     sp->global_timer_manager->add_timer(std::make_unique<timer_info>(duration_ms(ROUND_TRIP_TIME * 2), cb));
                 }
             };
 
-            global_timer_manager->add_timer(
-                std::make_unique<timer_info>(
-                    duration_ms(ROUND_TRIP_TIME * 2), cb));
+            global_timer_manager->add_timer(std::make_unique<timer_info>(duration_ms(ROUND_TRIP_TIME * 2), cb));
 
             return {false, false};
         }
@@ -145,6 +151,7 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
 
     fsm_result handle_change(uint8_t rcvd_flags)
     {
+        std::lock_guard<std::recursive_mutex> lg(g_connection_state_machine_mutex);
 
         if (current_state.load() == CONNECTION_STATE::CLOSED)
         {
@@ -191,10 +198,15 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
                     if (sp == nullptr or --retries == 0)
                         return;
 
+                    std::lock_guard<std::recursive_mutex> lg(g_connection_state_machine_mutex);
                     duration_ms time_spent = std::chrono::duration_cast<duration_ms>(std::chrono::steady_clock::now() - sp->last_ack_send_time);
                     if (time_spent < duration_ms(connection_state_machine::ROUND_TRIP_TIME * 2))
                     {
                         sp->last_response = {sp->get_ack_flag(), true};
+                    }
+
+                    if (time_spent < duration_ms(connection_state_machine::ROUND_TRIP_TIME * 2))
+                    {
                         sp->send_response_to_network_without_piggybacking();
                         sp->global_timer_manager->add_timer(std::make_unique<timer_info>(duration_ms(connection_state_machine::ROUND_TRIP_TIME * 2), cb));
                     }
@@ -248,18 +260,18 @@ class session_control : public i_udp_callback, public i_channel_manager_callback
     std::shared_ptr<timer_manager> global_timer_manager;
     std::shared_ptr<i_udp_callback> udp_ptr;
     std::weak_ptr<i_session_control_callback> channel_manager_ptr;
-    std::unordered_map<transport_addr, client_id, transport_addr_hasher> clients_addr_to_id;
-    std::unordered_map<client_id, transport_addr> clients_id_to_addr;
-    std::unordered_map<client_id, std::shared_ptr<connection_state_machine>> clients_fsm;
+    thread_safe_unordered_map<transport_addr, client_id, transport_addr_hasher> clients_addr_to_id;
+    thread_safe_unordered_map<client_id, transport_addr> clients_id_to_addr;
+    thread_safe_unordered_map<client_id, std::shared_ptr<connection_state_machine>> clients_fsm;
 
     thread_safe_unordered_map<client_id, std::shared_ptr<std::atomic<int>>> teardown_counter;
 
     void perform_final_cleanup(client_id cl_id)
     {
-        if (clients_id_to_addr.contains(cl_id))
+        auto addr_opt = clients_id_to_addr.get(cl_id);
+        if (addr_opt)
         {
-            auto addr = clients_id_to_addr[cl_id];
-            clients_addr_to_id.erase(addr);
+            clients_addr_to_id.erase(addr_opt.value());
             clients_id_to_addr.erase(cl_id);
         }
         teardown_counter.erase(cl_id);
@@ -281,7 +293,10 @@ class session_control : public i_udp_callback, public i_channel_manager_callback
 
     void add_session_control_header(const client_id &cl_id, rudp_protocol_packet &pkt)
     {
-        connection_state_machine::to_send_response res = clients_fsm[cl_id]->get_to_send_response();
+        auto fsm_opt = clients_fsm.get(cl_id);
+        if (!fsm_opt)
+            return;
+        connection_state_machine::to_send_response res = fsm_opt.value()->get_to_send_response();
         rudp_protocol::session_control_header header;
         header.flags = 0, header.reserved = 0;
 
@@ -296,7 +311,10 @@ class session_control : public i_udp_callback, public i_channel_manager_callback
 
     bool verify_can_exchange_data(const client_id &cl_id)
     {
-        return !closed.load() && clients_fsm.contains(cl_id) && clients_fsm[cl_id]->current_state.load() == CONNECTION_STATE::ESTABLISHED;
+        if (closed.load())
+            return false;
+        auto fsm_opt = clients_fsm.get(cl_id);
+        return fsm_opt && fsm_opt.value()->current_state.load() == CONNECTION_STATE::ESTABLISHED;
     }
 
     void parse_session_control_packet_header(const rudp_protocol_packet &incoming_pkt, const transport_addr &source_addr)
@@ -318,20 +336,32 @@ class session_control : public i_udp_callback, public i_channel_manager_callback
                     break;
             }
             create_fsm_for_client(cl_id, source_addr);
-            connection_state_machine::fsm_result res = clients_fsm[cl_id]->handle_change(flags & ((uint8_t(1) << 4) - 1));
+            auto fsm_opt = clients_fsm.get(cl_id);
+            if (!fsm_opt)
+                return;
+
+            connection_state_machine::fsm_result res = fsm_opt.value()->handle_change(flags & ((uint8_t(1) << 4) - 1));
 
             if (res.close_connection)
                 clients_fsm.erase(cl_id);
             else
             {
-                clients_addr_to_id.emplace(source_addr, cl_id);
-                clients_id_to_addr.emplace(cl_id, source_addr);
+                clients_addr_to_id.insert(source_addr, cl_id);
+                clients_id_to_addr.insert(cl_id, source_addr);
             }
         }
         else
         {
-            client_id cl_id = clients_addr_to_id[source_addr];
-            connection_state_machine::fsm_result res = clients_fsm[cl_id]->handle_change(flags & ((uint8_t(1) << 4) - 1));
+            auto cid_opt = clients_addr_to_id.get(source_addr);
+            if (!cid_opt)
+                return;
+            client_id cl_id = cid_opt.value();
+
+            auto fsm_opt = clients_fsm.get(cl_id);
+            if (!fsm_opt)
+                return;
+
+            connection_state_machine::fsm_result res = fsm_opt.value()->handle_change(flags & ((uint8_t(1) << 4) - 1));
 
             if (res.close_connection)
             {
@@ -356,14 +386,14 @@ class session_control : public i_udp_callback, public i_channel_manager_callback
 
     void create_fsm_for_client(const client_id &cl_id, const transport_addr &source_addr)
     {
-        clients_fsm.emplace(cl_id, std::make_shared<connection_state_machine>([source_addr, this](uint8_t fsm_flags)
-                                                                              {
+        clients_fsm.insert(cl_id, std::make_shared<connection_state_machine>([source_addr, this](uint8_t fsm_flags)
+                                                                             {
                                                                                   char buf[rudp_protocol::SESSION_CONTROL_HEADER_SIZE];
 
                                                                                   memcpy(buf, &fsm_flags, sizeof(fsm_flags));
                                                                                   // here we culd have more of stuff as session control if we wanna add 
 
-                                                                                  this->udp_ptr->send_packet_to_network(source_addr, buf, sizeof(buf)) ; }, global_timer_manager));
+                                                                                  this->udp_ptr->send_packet_to_network(source_addr, buf, sizeof(buf)); }, global_timer_manager));
     }
 
 public:
@@ -378,10 +408,12 @@ public:
     }
     void on_close_server() override
     {
-
         std::vector<client_id> to_clean_up;
-        for (auto &[cl_id, fsm] : clients_fsm)
+        auto items = clients_fsm.items();
+        for (auto &p : items)
         {
+            client_id cl_id = p.first;
+            auto fsm = p.second;
             connection_state_machine::fsm_result res = fsm->close();
             if (res.close_connection)
                 to_clean_up.push_back(cl_id); // directly closing on netowrk and applicaiton togehter
@@ -391,12 +423,12 @@ public:
         for (auto i : to_clean_up)
             perform_final_cleanup(i);
 
-        if (!clients_fsm.empty())
+        if (clients_fsm.size() > 0)
         {
             auto this_shared_ptr = shared_from_this();
             std::function<void()> cb = [this_shared_ptr, cb]
             {
-                if (!this_shared_ptr->clients_fsm.empty())
+                if (this_shared_ptr->clients_fsm.size() > 0)
                 {
                     this_shared_ptr->global_timer_manager->add_timer(std::make_unique<timer_info>(duration_ms(100), cb));
                 }
@@ -414,11 +446,10 @@ public:
     {
         parse_session_control_packet_header(*pkt, *source_addr);
 
-        auto it = clients_addr_to_id.find(*source_addr);
-
-        if (it != clients_addr_to_id.end() && verify_can_exchange_data(it->second))
+        auto cid_opt = clients_addr_to_id.get(*source_addr);
+        if (cid_opt && verify_can_exchange_data(cid_opt.value()))
             if (auto cm_sp = channel_manager_ptr.lock())
-                cm_sp->on_transport_receive(it->second, std::move(pkt));
+                cm_sp->on_transport_receive(cid_opt.value(), std::move(pkt));
     }
 
     void on_transport_send_data(const client_id &cl_id, std::unique_ptr<rudp_protocol_packet> pkt) override
@@ -426,7 +457,9 @@ public:
         if (verify_can_exchange_data(cl_id))
         {
             add_session_control_header(cl_id, *pkt);
-            udp_ptr->send_packet_to_network(clients_id_to_addr[cl_id], pkt->get_buffer(), pkt->get_length());
+            auto addr_opt = clients_id_to_addr.get(cl_id);
+            if (addr_opt)
+                udp_ptr->send_packet_to_network(addr_opt.value(), pkt->get_buffer(), pkt->get_length());
         }
     }
 };

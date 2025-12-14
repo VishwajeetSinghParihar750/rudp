@@ -87,4 +87,14 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         map_.clear();
     }
+
+    std::vector<std::pair<K, V>> items() const
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        std::vector<std::pair<K, V>> res;
+        res.reserve(map_.size());
+        for (const auto &kv : map_)
+            res.emplace_back(kv.first, kv.second);
+        return res;
+    }
 };
