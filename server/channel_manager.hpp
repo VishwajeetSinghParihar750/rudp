@@ -44,7 +44,7 @@ struct rcv_ready_queue_info
     }
 };
 
-class channel_manager : public i_server, public i_session_control_callback
+class channel_manager : public i_server, public i_session_control_callback, public std::enable_shared_from_this<channel_manager>
 {
 
     static constexpr uint32_t MAX_CHANNELS = 2048;
@@ -95,16 +95,26 @@ class channel_manager : public i_server, public i_session_control_callback
 
             ch->set_timer_manager(global_timers_manager);
 
-            ch->set_on_app_data_ready([this, cl_id, ch_id]()
-                                      {
-                rcv_ready_queue_info info;
-                info.ch_id = ch_id;
-                info.cl_id= cl_id;
-                info.time = std::chrono::steady_clock::now();
-            ready_to_rcv_queue->push(std::move(info)) ; });
+            std::weak_ptr<channel_manager> this_weak_ptr = shared_from_this();
+            ch->set_on_app_data_ready(
+                [this_weak_ptr, cl_id, ch_id]()
+                {
+                    if (auto sp = this_weak_ptr.lock())
+                    {
+                        rcv_ready_queue_info info;
+                        info.ch_id = ch_id;
+                        info.cl_id = cl_id;
+                        info.time = std::chrono::steady_clock::now();
+                        sp->ready_to_rcv_queue->push(std::move(info));
+                    }
+                });
 
-            ch->set_on_net_data_ready([this, cl_id, ch_id](std::unique_ptr<rudp_protocol_packet> pkt)
-                                      { on_transport_send(cl_id, ch_id, std::move(pkt)); });
+            ch->set_on_net_data_ready(
+                [this_weak_ptr, cl_id, ch_id](std::unique_ptr<rudp_protocol_packet> pkt)
+                {
+                    if (auto sp = this_weak_ptr.lock())
+                        sp->on_transport_send(cl_id, ch_id, std::move(pkt));
+                });
 
             return ch;
         }

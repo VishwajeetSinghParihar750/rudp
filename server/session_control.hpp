@@ -240,9 +240,11 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
     }
 };
 
-class session_control : public i_udp_callback, public i_channel_manager_callback
+class session_control : public i_udp_callback, public i_channel_manager_callback, public std::enable_shared_from_this<session_control>
 {
+    std::atomic<bool> closed = false;
 
+    std::shared_ptr<timer_manager> global_timer_manager;
     std::shared_ptr<i_udp_callback> udp_ptr;
     std::weak_ptr<i_session_control_callback> channel_manager_ptr;
     std::unordered_map<transport_addr, client_id, transport_addr_hasher> clients_addr_to_id;
@@ -293,7 +295,7 @@ class session_control : public i_udp_callback, public i_channel_manager_callback
 
     bool verify_can_exchange_data(const client_id &cl_id)
     {
-        return clients_fsm.contains(cl_id) && clients_fsm[cl_id]->current_state.load() == CONNECTION_STATE::ESTABLISHED;
+        return !closed.load() && clients_fsm.contains(cl_id) && clients_fsm[cl_id]->current_state.load() == CONNECTION_STATE::ESTABLISHED;
     }
 
     void parse_session_control_packet_header(const rudp_protocol_packet &incoming_pkt, const transport_addr &source_addr)
@@ -304,6 +306,9 @@ class session_control : public i_udp_callback, public i_channel_manager_callback
 
         if (!clients_addr_to_id.contains(source_addr))
         {
+            if (closed.load())
+                return; // server closed
+
             client_id cl_id;
             while (true)
             {
@@ -337,7 +342,6 @@ class session_control : public i_udp_callback, public i_channel_manager_callback
 
             if (res.stop_data_exchange)
             {
-
                 if (auto sp = channel_manager_ptr.lock())
                 {
                     if (!teardown_counter.contains(cl_id))
@@ -358,10 +362,11 @@ class session_control : public i_udp_callback, public i_channel_manager_callback
                                                                                   memcpy(buf, &fsm_flags, sizeof(fsm_flags));
                                                                                   // here we culd have more of stuff as session control if we wanna add 
 
-                                                                                  this->udp_ptr->send_packet_to_network(source_addr, buf, sizeof(buf)) ; }));
+                                                                                  this->udp_ptr->send_packet_to_network(source_addr, buf, sizeof(buf)) ; }, global_timer_manager));
     }
 
 public:
+    void set_timer_manager(std::shared_ptr<timer_manager> timer_man) { global_timer_manager = timer_man; }
     void set_udp(std::shared_ptr<i_udp_callback> udp_ptr_)
     {
         udp_ptr = udp_ptr_;
@@ -378,13 +383,26 @@ public:
         {
             connection_state_machine::fsm_result res = fsm->close();
             if (res.close_connection)
-            {
-                to_clean_up.push_back(cl_id);
-            }
+                to_clean_up.push_back(cl_id); // directly closing on netowrk and applicaiton togehter
+            else
+                teardown_counter.insert(cl_id, std::make_shared<std::atomic<int>>(1)); // application side has said close, watiting for network now
         }
         for (auto i : to_clean_up)
             perform_final_cleanup(i);
-        //
+
+        if (!clients_fsm.empty())
+        {
+            auto this_shared_ptr = shared_from_this();
+            std::function<void()> cb = [this_shared_ptr, cb]
+            {
+                if (!this_shared_ptr->clients_fsm.empty())
+                {
+                    this_shared_ptr->global_timer_manager->add_timer(std::make_unique<timer_info>(duration_ms(100), cb));
+                }
+            };
+
+            global_timer_manager->add_timer(std::make_unique<timer_info>(duration_ms(100), cb));
+        } // this shared ptr will keep session control alive until all fsms gracefully close
     }
     void notify_removal_of_client(const client_id &cl_id) override
     {
