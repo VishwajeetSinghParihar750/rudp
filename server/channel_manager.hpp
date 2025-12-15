@@ -14,6 +14,7 @@
 #include <chrono>
 
 #include "types.hpp"
+#include "thread_safe_unordered_map.hpp"
 #include "thread_safe_unordered_set.hpp"
 #include "i_channel.hpp"
 #include "udp.hpp"
@@ -53,7 +54,17 @@ class channel_manager : public i_server, public i_session_control_callback, publ
 
     std::shared_ptr<timer_manager> global_timers_manager;
     std::unordered_map<channel_id, channel_type> channels;
-    std::unordered_map<client_id, std::unordered_map<channel_id, std::unique_ptr<i_channel>>> per_client_channels;
+    /*
+        its undefined behavior to add channels after you have started the server
+        so only read happens after server start, so its thread safe
+    */
+
+    using channel_map_t = thread_safe_unordered_map<channel_id, std::shared_ptr<i_channel>>;
+    thread_safe_unordered_map<client_id, std::shared_ptr<channel_map_t>> per_client_channels;
+    /*
+        Each client's channel map is a thread-safe map of shared_ptr<i_channel>.
+        Access to per_client_channels and each inner channel_map_t is synchronized.
+    */
 
     thread_safe_unordered_set<client_id> pending_disconnects;
 
@@ -82,7 +93,7 @@ class channel_manager : public i_server, public i_session_control_callback, publ
 
     std::shared_ptr<i_channel_manager_callback> session_control_;
 
-    std::unique_ptr<i_channel> create_new_channel_for_client(client_id cl_id, channel_id ch_id)
+    std::shared_ptr<i_channel> create_new_channel_for_client(client_id cl_id, channel_id ch_id)
     {
         if (!channels.contains(ch_id))
             return nullptr;
@@ -91,7 +102,7 @@ class channel_manager : public i_server, public i_session_control_callback, publ
         {
         case channel_type::RELIABLE_ORDERED_CHANNEL:
         {
-            auto ch = std::make_unique<reliable_ordered_channel>(ch_id);
+            auto ch = std::make_shared<reliable_ordered_channel>(ch_id);
 
             ch->set_timer_manager(global_timers_manager);
 
@@ -174,10 +185,18 @@ public:
         client_id_ = info.cl_id;
         channel_id_ = info.ch_id;
 
-        if (!per_client_channels.contains(client_id_) || !per_client_channels[client_id_].contains(channel_id_))
+        auto client_map_opt = per_client_channels.get(client_id_);
+        if (!client_map_opt)
+            return read_from_channel_nonblocking(channel_id_, client_id_, buf, len);
+        auto client_map = client_map_opt.value();
+        if (!client_map->contains(channel_id_))
             return read_from_channel_nonblocking(channel_id_, client_id_, buf, len);
 
-        auto &cur_channel = per_client_channels[client_id_][channel_id_];
+        auto ch_opt = client_map->get(channel_id_);
+        if (!ch_opt)
+            return read_from_channel_nonblocking(channel_id_, client_id_, buf, len);
+
+        auto cur_channel = ch_opt.value();
         return cur_channel->read_bytes_to_application(buf, len);
     }
 
@@ -202,20 +221,35 @@ public:
                 client_id_ = info.cl_id;
                 channel_id_ = info.ch_id;
 
-                if (per_client_channels.contains(client_id_) && per_client_channels[client_id_].contains(channel_id_))
+                auto client_map_opt = per_client_channels.get(client_id_);
+                if (client_map_opt)
                 {
-                    auto &cur_channel = per_client_channels[client_id_][channel_id_];
-                    return cur_channel->read_bytes_to_application(buf, len);
+                    auto client_map = client_map_opt.value();
+                    if (client_map->contains(channel_id_))
+                    {
+                        auto ch_opt = client_map->get(channel_id_);
+                        if (ch_opt)
+                        {
+                            auto cur_channel = ch_opt.value();
+                            return cur_channel->read_bytes_to_application(buf, len);
+                        }
+                    }
                 }
             }
         }
     }
     ssize_t write_to_channel(const channel_id &channel_id_, const client_id &client_id_, const char *buf, const size_t len) override
     {
-        if (!per_client_channels.contains(client_id_))
+        auto client_map_opt = per_client_channels.get(client_id_);
+        if (!client_map_opt)
+            return -1;
+        auto client_map = client_map_opt.value();
+
+        auto ch_opt = client_map->get(channel_id_);
+        if (!ch_opt)
             return -1;
 
-        auto &cur_channel = per_client_channels[client_id_][channel_id_];
+        auto cur_channel = ch_opt.value();
         return cur_channel->write_bytes_from_application(buf, len);
     }
 
@@ -223,17 +257,24 @@ public:
 
     void on_transport_receive(const client_id &cl_id, std::unique_ptr<rudp_protocol_packet> pkt) override
     {
-        if (!per_client_channels.contains(cl_id))
+        auto client_map_opt = per_client_channels.get(cl_id);
+        if (!client_map_opt)
             return;
 
         rudp_protocol::channel_manager_header cm_header = deserialize_channel_manager_header(*pkt);
         if (channels.contains(cm_header.ch_id))
-            per_client_channels[cl_id][cm_header.ch_id]->on_transport_receive(std::move(pkt));
+        {
+            auto client_map = client_map_opt.value();
+            auto ch_opt = client_map->get(cm_header.ch_id);
+            if (ch_opt)
+                ch_opt.value()->on_transport_receive(std::move(pkt));
+        }
     }
 
     void add_client(const client_id &cl_id) override
     {
-        per_client_channels.emplace(cl_id);
+        // create a new thread-safe channel map for this client
+        per_client_channels.insert(cl_id, std::make_shared<channel_map_t>());
     }
     void remove_client(const client_id &cl_id) override
     {
