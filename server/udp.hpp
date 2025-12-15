@@ -130,12 +130,7 @@ class udp
 
                     int n = recvfrom(socket_fd, pkt->get_buffer(), pkt->get_capacity(), 0, addr->get_mutable_sockaddr(), addr->get_mutable_socklen());
 
-                    if (n <= 0)
-                    {
-                        // handle error, assert for now
-                        assert(n > 0);
-                    }
-                    else
+                    if (n > 0)
                     {
                         pkt->set_length(n);
                         session_control_sp = session_control_.lock();
@@ -208,9 +203,6 @@ public:
 
         close(socket_fd);
         close(epoll_fd);
-
-        io_thread.request_stop();
-        io_thread.join();
     }
 
     ssize_t send_packet_to_network(const transport_addr &addr, const char *buf, const size_t &len)
@@ -222,7 +214,7 @@ public:
             addr.get_sockaddr(), *addr.get_socklen());
     }
 
-    void set_channel_manager(std::weak_ptr<i_udp_callback> cm)
+    void set_sesion_control(std::weak_ptr<i_udp_callback> cm)
     {
         session_control_ = cm;
     }

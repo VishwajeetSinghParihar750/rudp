@@ -71,6 +71,12 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
     to_send_response last_response;
     TimerInfoTimePoint last_ack_send_time;
 
+    bool can_exchange_data() const
+    {
+        std::lock_guard<std::recursive_mutex> lg(g_connection_state_machine_mutex);
+        return current_state.load() == CONNECTION_STATE::ESTABLISHED;
+    }
+
     void set_last_ack_sent_time()
     {
         std::lock_guard<std::recursive_mutex> lg(g_connection_state_machine_mutex);
@@ -81,10 +87,11 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
     {
         std::lock_guard<std::recursive_mutex> lg(g_connection_state_machine_mutex);
         auto toret = last_response;
-        last_response.to_send = false;
 
-        if (toret.response_flags & (get_ack_flag()))
+        if ((toret.response_flags & (get_ack_flag())) && toret.to_send)
             set_last_ack_sent_time();
+
+        last_response.to_send = false;
 
         return toret;
     }
@@ -255,7 +262,7 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
 
 class session_control : public i_udp_callback, public i_channel_manager_callback, public std::enable_shared_from_this<session_control>
 {
-    std::atomic<bool> closed = false;
+    std::atomic<bool> server_closed = false;
 
     std::shared_ptr<timer_manager> global_timer_manager;
     std::shared_ptr<i_udp_callback> udp_ptr;
@@ -311,10 +318,10 @@ class session_control : public i_udp_callback, public i_channel_manager_callback
 
     bool verify_can_exchange_data(const client_id &cl_id)
     {
-        if (closed.load())
+        if (server_closed.load())
             return false;
         auto fsm_opt = clients_fsm.get(cl_id);
-        return fsm_opt && fsm_opt.value()->current_state.load() == CONNECTION_STATE::ESTABLISHED;
+        return fsm_opt && fsm_opt.value()->can_exchange_data();
     }
 
     void parse_session_control_packet_header(const rudp_protocol_packet &incoming_pkt, const transport_addr &source_addr)
@@ -325,7 +332,7 @@ class session_control : public i_udp_callback, public i_channel_manager_callback
 
         if (!clients_addr_to_id.contains(source_addr))
         {
-            if (closed.load())
+            if (server_closed.load())
                 return; // server closed
 
             client_id cl_id;
@@ -408,6 +415,8 @@ public:
     }
     void on_close_server() override
     {
+        server_closed.store(true);
+
         std::vector<client_id> to_clean_up;
         auto items = clients_fsm.items();
         for (auto &p : items)

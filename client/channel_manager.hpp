@@ -20,7 +20,7 @@
 #include "udp.hpp"
 #include "rudp_protocol.hpp"
 #include "channels/realible_ordered_channel/reliable_ordered_channel.hpp"
-#include "i_server.hpp"
+#include "i_client.hpp"
 #include "i_udp_callback.hpp"
 #include "i_session_control_callback.hpp"
 #include "thread_safe_priority_queue.hpp"
@@ -29,14 +29,13 @@
 
 enum class READ_FROM_CHANNEL_ERROR : ssize_t
 {
-    CLIENT_DISCONNECTED = -1,
+    SERVER_DISCONNECTED = -1,
     NO_PENDING_DATA = -2
 
 };
 struct rcv_ready_queue_info
 {
     std::chrono::steady_clock::time_point time;
-    client_id cl_id;
     channel_id ch_id;
 
     bool operator<(const rcv_ready_queue_info &other) const
@@ -50,7 +49,7 @@ struct rcv_ready_queue_info
     }
 };
 
-class channel_manager : public i_server, public i_session_control_callback, public std::enable_shared_from_this<channel_manager>
+class channel_manager : public i_client, public i_session_control_callback, public std::enable_shared_from_this<channel_manager>
 {
 
     static constexpr uint32_t MAX_CHANNELS = 2048;
@@ -59,15 +58,15 @@ class channel_manager : public i_server, public i_session_control_callback, publ
 
     std::shared_ptr<timer_manager> global_timers_manager;
     std::unordered_map<channel_id, channel_type> channels;
+
     /*
         its undefined behavior to add channels after you have started the server
         so only read happens after server start, so its thread safe
     */
 
-    using channel_map_t = thread_safe_unordered_map<channel_id, std::shared_ptr<i_channel>>;
-    thread_safe_unordered_map<client_id, std::shared_ptr<channel_map_t>> per_client_channels;
+    thread_safe_unordered_map<channel_id, std::shared_ptr<i_channel>> active_channels;
 
-    thread_safe_unordered_set<client_id> pending_disconnects;
+    std::atomic<bool> server_closed = false;
 
     void serialize_channel_manager_header(rudp_protocol_packet &pkt, const rudp_protocol::channel_manager_header &c_header)
     {
@@ -100,7 +99,7 @@ class channel_manager : public i_server, public i_session_control_callback, publ
 
     std::shared_ptr<i_channel_manager_callback> session_control_;
 
-    std::shared_ptr<i_channel> create_new_channel_for_client(client_id cl_id, channel_id ch_id)
+    std::shared_ptr<i_channel> create_new_active_channel(channel_id ch_id)
     {
         if (!channels.contains(ch_id))
             return nullptr;
@@ -115,23 +114,22 @@ class channel_manager : public i_server, public i_session_control_callback, publ
 
             std::weak_ptr<channel_manager> this_weak_ptr = shared_from_this();
             ch->set_on_app_data_ready(
-                [this_weak_ptr, cl_id, ch_id]()
+                [this_weak_ptr, ch_id]()
                 {
                     if (auto sp = this_weak_ptr.lock())
                     {
                         rcv_ready_queue_info info;
                         info.ch_id = ch_id;
-                        info.cl_id = cl_id;
                         info.time = std::chrono::steady_clock::now();
                         sp->ready_to_rcv_queue->push(std::move(info));
                     }
                 });
 
             ch->set_on_net_data_ready(
-                [this_weak_ptr, cl_id, ch_id](std::unique_ptr<rudp_protocol_packet> pkt)
+                [this_weak_ptr, ch_id](std::unique_ptr<rudp_protocol_packet> pkt)
                 {
                     if (auto sp = this_weak_ptr.lock())
-                        sp->on_transport_send(cl_id, ch_id, std::move(pkt));
+                        sp->on_transport_send(ch_id, std::move(pkt));
                 });
 
             return ch;
@@ -142,20 +140,14 @@ class channel_manager : public i_server, public i_session_control_callback, publ
         }
     }
 
-    void on_transport_send(const client_id &cl_id, const channel_id &ch_id, std::unique_ptr<rudp_protocol_packet> pkt)
+    void on_transport_send(const channel_id &ch_id, std::unique_ptr<rudp_protocol_packet> pkt)
     {
         serialize_channel_manager_header(*pkt, ch_id);
-        session_control_->on_transport_send_data(cl_id, std::move(pkt));
-    }
-
-    void perform_final_cleanup(client_id cl_id)
-    {
-        per_client_channels.erase(cl_id);
-        session_control_->notify_removal_of_client(cl_id);
+        session_control_->on_transport_send_data(std::move(pkt));
     }
 
 public:
-    // for i_server
+    // for i_client
     void add_channel(channel_id ch_id, channel_type type) override
     {
         //  ℹ️add error handling to resopns back with error if wrong
@@ -168,21 +160,19 @@ public:
         }
     }
 
-    void close_server() override
+    void close_client() override
     {
-        session_control_->on_close_server(); // now nothing should come to me from server, and if application tries to read or write after calling close, its undefined from my side
+        session_control_->on_close_client(); // now nothing should come to me from server, and if application tries to read or write after calling close, its undefined from my side
         // my things will get remvoed in destructor iteslf
     }
 
-    ssize_t read_from_channel_nonblocking(channel_id &channel_id_, client_id &client_id_, char *buf, const size_t len) override
+    ssize_t read_from_channel_nonblocking(channel_id &channel_id_, char *buf, const size_t len) override
     {
 
-        if (pending_disconnects.size() > 0)
+        if (server_closed.load())
         {
-            client_id_ = pending_disconnects.pop();
             channel_id_ = INVALID_CHANNEL_ID;
-
-            return (ssize_t)READ_FROM_CHANNEL_ERROR::CLIENT_DISCONNECTED;
+            return (ssize_t)READ_FROM_CHANNEL_ERROR::SERVER_DISCONNECTED;
         }
 
         rcv_ready_queue_info info;
@@ -190,70 +180,46 @@ public:
         if (!result)
             return (ssize_t)READ_FROM_CHANNEL_ERROR::NO_PENDING_DATA;
 
-        client_id_ = info.cl_id;
         channel_id_ = info.ch_id;
 
-        auto client_map_opt = per_client_channels.get(client_id_);
-        if (!client_map_opt)
-            return read_from_channel_nonblocking(channel_id_, client_id_, buf, len);
-        auto client_map = client_map_opt.value();
-        if (!client_map->contains(channel_id_))
-            return read_from_channel_nonblocking(channel_id_, client_id_, buf, len);
+        if (!active_channels.contains(channel_id_))
+            return read_from_channel_nonblocking(channel_id_, buf, len);
 
-        auto ch_opt = client_map->get(channel_id_);
-        if (!ch_opt)
-            return read_from_channel_nonblocking(channel_id_, client_id_, buf, len);
-
-        auto cur_channel = ch_opt.value();
-        return cur_channel->read_bytes_to_application(buf, len);
+        auto cur_channel_opt = active_channels.get(channel_id_);
+        if (cur_channel_opt)
+            return cur_channel_opt.value()->read_bytes_to_application(buf, len);
     }
 
-    ssize_t read_from_channel_blocking(channel_id &channel_id_, client_id &client_id_, char *buf, const size_t len) override
+    ssize_t read_from_channel_blocking(channel_id &channel_id_, char *buf, const size_t len) override
     {
         rcv_ready_queue_info info;
 
         while (true)
         {
-            if (pending_disconnects.size() > 0)
+            if (server_closed.load())
             {
-                client_id_ = pending_disconnects.pop();
                 channel_id_ = INVALID_CHANNEL_ID;
-
-                return (ssize_t)READ_FROM_CHANNEL_ERROR::CLIENT_DISCONNECTED;
+                return (ssize_t)READ_FROM_CHANNEL_ERROR::SERVER_DISCONNECTED;
             }
 
             auto result = ready_to_rcv_queue->wait_for_and_pop(info, duration_ms(100));
 
             if (result)
             {
-                client_id_ = info.cl_id;
                 channel_id_ = info.ch_id;
 
-                auto client_map_opt = per_client_channels.get(client_id_);
-                if (client_map_opt)
+                auto ch_opt = active_channels.get(channel_id_);
+                if (ch_opt)
                 {
-                    auto client_map = client_map_opt.value();
-                    if (client_map->contains(channel_id_))
-                    {
-                        auto ch_opt = client_map->get(channel_id_);
-                        if (ch_opt)
-                        {
-                            auto cur_channel = ch_opt.value();
-                            return cur_channel->read_bytes_to_application(buf, len);
-                        }
-                    }
+                    auto cur_channel = ch_opt.value();
+                    return cur_channel->read_bytes_to_application(buf, len);
                 }
             }
         }
     }
-    ssize_t write_to_channel(const channel_id &channel_id_, const client_id &client_id_, const char *buf, const size_t len) override
+    ssize_t write_to_channel(const channel_id &channel_id_, const char *buf, const size_t len) override
     {
-        auto client_map_opt = per_client_channels.get(client_id_);
-        if (!client_map_opt)
-            return -1;
-        auto client_map = client_map_opt.value();
-
-        auto ch_opt = client_map->get(channel_id_);
+        auto ch_opt = active_channels.get(channel_id_);
         if (!ch_opt)
             return -1;
 
@@ -263,31 +229,15 @@ public:
 
     // for i session control
 
-    void on_transport_receive(const client_id &cl_id, std::unique_ptr<rudp_protocol_packet> pkt) override
+    void on_transport_receive(std::unique_ptr<rudp_protocol_packet> pkt) override
     {
-        auto client_map_opt = per_client_channels.get(cl_id);
-        if (!client_map_opt)
-            return;
-
         rudp_protocol::channel_manager_header cm_header = deserialize_channel_manager_header(*pkt);
-        if (channels.contains(cm_header.ch_id))
-        {
-            auto client_map = client_map_opt.value();
-            auto ch_opt = client_map->get(cm_header.ch_id);
-            if (ch_opt)
-                ch_opt.value()->on_transport_receive(std::move(pkt));
-        }
+        auto ch_opt = active_channels.get(cm_header.ch_id);
+
+        if (ch_opt)
+            ch_opt.value()->on_transport_receive(std::move(pkt));
     }
 
-    void add_client(const client_id &cl_id) override
-    {
-        // create a new thread-safe channel map for this client
-        per_client_channels.insert(cl_id, std::make_shared<channel_map_t>());
-    }
-    void remove_client(const client_id &cl_id) override
-    {
-        pending_disconnects.insert(cl_id);
-    }
     void set_timer_manager(std::shared_ptr<timer_manager> timer_man) { global_timers_manager = timer_man; }
     void set_session_control(std::shared_ptr<i_channel_manager_callback> ses_control)
     {
