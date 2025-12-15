@@ -33,9 +33,6 @@ enum class channel_flags : uint16_t
 {
     ACK = 1,
     WIND_SZ = 2,
-    SYN = 4,
-    FIN = 8,
-    RST = 16
 };
 
 struct channel_header
@@ -493,7 +490,6 @@ private:
     // === Timer Configuration ===
     static constexpr uint64_t KEEPALIVE_INTERVAL_MS = 30000; // 30 seconds
     static constexpr uint64_t DELAYED_ACK_MS = 40;           // 40ms delayed ACK
-    static constexpr uint64_t FIN_WAIT_MS = 2000;            // 2 second FIN wait
 
     // === Timer Handlers ===
     void on_rto_expire()
@@ -530,12 +526,6 @@ private:
         }
     }
 
-    void on_fin_wait_expire()
-    {
-        // FIN wait timeout: force close
-        // Connection cleanup handled by channel_manager
-    }
-
     // === Timer Scheduling ===
     void schedule_rto_timer()
     {
@@ -570,23 +560,14 @@ private:
         global_timer_manager->add_timer(std::move(timer));
     }
 
-    void schedule_fin_wait_timer()
-    {
-        if (!global_timer_manager)
-            return;
-
-        auto cb = [this]()
-        { this->on_fin_wait_expire(); };
-        auto timer = std::make_unique<timer_info>(duration_ms(FIN_WAIT_MS), cb);
-        global_timer_manager->add_timer(std::move(timer));
-    }
-
 public:
     explicit reliable_ordered_channel(channel_id id) : ch_id(id) {}
 
     std::unique_ptr<i_channel> clone() const override
     {
-        return std::make_unique<reliable_ordered_channel>(*this);
+        // Cannot clone: contains non-copyable members (atomics, mutexes)
+        // Return null to indicate cloning is not supported
+        return nullptr;
     }
 
     void on_transport_receive(std::unique_ptr<rudp_protocol_packet> pkt) override

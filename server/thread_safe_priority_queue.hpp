@@ -11,10 +11,18 @@ template <typename T, typename Container = std::vector<T>, typename Compare = st
 class thread_safe_priority_queue
 {
 public:
-    void push(const T &value)
+    void push(T &&value)
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        data_.push(value);
+        data_.push(std::move(value));
+        cv_.notify_one();
+    }
+
+    template <typename... Args>
+    void emplace(Args &&...args)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        data_.emplace(std::forward<Args>(args)...);
         cv_.notify_one();
     }
 
@@ -86,9 +94,9 @@ public:
         bool status = cv_.wait_for(lock, timeout, [this]
                                    { return !data_.empty(); });
 
-        if (status)
+        if (status && !data_.empty())
         {
-            value = std::move(data_.top());
+            value = data_.top();
             data_.pop();
             return true;
         }

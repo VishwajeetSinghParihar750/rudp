@@ -1,19 +1,15 @@
-// #pragma once
-// #include "udp.hpp"
-// #include "channel_manager.hpp"
-// #include "i_server.hpp"
+#pragma once
 
-// #include <memory>
+#include "channel_manager.hpp"
+#include "i_server.hpp"
+#include "timer_manager.hpp"
 
-// inline std::shared_ptr<i_server> create_server(const char *PORT = "4004")
-// {
-//     //
-//     // std::shared_ptr<udp> udp_ = std::make_shared<udp>(PORT);
-//     // std::shared_ptr<channel_manager> channel_manager_ = std::make_shared<channel_manager>();
+#include <memory>
 
-//     // channel_manager_->set_udp_transport(udp_);
-//     // udp_->set_channel_manager(channel_manager_);
+inline std::shared_ptr<i_server> create_server(const char *PORT = "4004")
+{
+    // Create channel manager (which manages timers and session control internally)
+    auto channel_manager_ = std::make_shared<channel_manager>();
 
-//     // //
-//     // return channel_manager_;
-// }
+    return channel_manager_;
+}

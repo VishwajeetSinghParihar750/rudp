@@ -43,6 +43,11 @@ struct rcv_ready_queue_info
     {
         return time < other.time;
     }
+
+    bool operator>(const rcv_ready_queue_info &other) const
+    {
+        return time > other.time;
+    }
 };
 
 class channel_manager : public i_server, public i_session_control_callback, public std::enable_shared_from_this<channel_manager>
