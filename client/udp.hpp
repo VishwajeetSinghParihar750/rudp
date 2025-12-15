@@ -156,10 +156,6 @@ public:
     {
         connect_socket(host, port);
         setup_epoll();
-    }
-
-    void start_io()
-    {
         io_thread = std::jthread([this](std::stop_token token)
                                  { this->event_loop(std::move(token)); });
     }

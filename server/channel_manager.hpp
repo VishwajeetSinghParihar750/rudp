@@ -133,6 +133,9 @@ class channel_manager : public i_server, public i_channel_manager_for_session_co
                         sp->on_transport_send(cl_id, ch_id, std::move(pkt));
                 });
 
+            auto opt = per_client_channels.get(cl_id);
+            if (opt)
+                opt.value()->insert(ch_id, ch);
             return ch;
         }
 
