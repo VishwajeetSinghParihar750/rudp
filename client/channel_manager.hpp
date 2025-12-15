@@ -21,10 +21,9 @@
 #include "rudp_protocol.hpp"
 #include "channels/realible_ordered_channel/reliable_ordered_channel.hpp"
 #include "i_client.hpp"
-#include "i_udp_callback.hpp"
-#include "i_session_control_callback.hpp"
+#include "i_channel_manager_for_session_control.hpp"
 #include "thread_safe_priority_queue.hpp"
-#include "i_channel_manager_callback.hpp"
+#include "i_session_control_for_channel_manager.hpp"
 #include "timer_manager.hpp"
 
 enum class READ_FROM_CHANNEL_ERROR : ssize_t
@@ -49,8 +48,10 @@ struct rcv_ready_queue_info
     }
 };
 
-class channel_manager : public i_client, public i_session_control_callback, public std::enable_shared_from_this<channel_manager>
+class channel_manager : public i_client, public i_channel_manager_for_session_control, public std::enable_shared_from_this<channel_manager>
 {
+
+    //
 
     static constexpr uint32_t MAX_CHANNELS = 2048;
 
@@ -58,7 +59,6 @@ class channel_manager : public i_client, public i_session_control_callback, publ
 
     std::shared_ptr<timer_manager> global_timers_manager;
     std::unordered_map<channel_id, channel_type> channels;
-
     /*
         its undefined behavior to add channels after you have started the server
         so only read happens after server start, so its thread safe
@@ -97,7 +97,7 @@ class channel_manager : public i_client, public i_session_control_callback, publ
         return {static_cast<channel_id>(nch_id)};
     }
 
-    std::shared_ptr<i_channel_manager_callback> session_control_;
+    std::shared_ptr<i_session_control_for_channel_manager> session_control_;
 
     std::shared_ptr<i_channel> create_new_active_channel(channel_id ch_id)
     {
@@ -144,6 +144,14 @@ class channel_manager : public i_client, public i_session_control_callback, publ
     {
         serialize_channel_manager_header(*pkt, ch_id);
         session_control_->on_transport_send_data(std::move(pkt));
+    }
+
+    friend auto create_server(const char *);
+
+    void set_timer_manager(std::shared_ptr<timer_manager> timer_man) { global_timers_manager = timer_man; }
+    void set_session_control(std::shared_ptr<i_session_control_for_channel_manager> ses_control)
+    {
+        session_control_ = ses_control;
     }
 
 public:
@@ -221,7 +229,17 @@ public:
     {
         auto ch_opt = active_channels.get(channel_id_);
         if (!ch_opt)
-            return -1;
+        {
+            if (channels.contains(channel_id_))
+            {
+                if (create_new_active_channel(channel_id_) != nullptr)
+                    return write_to_channel(channel_id_, buf, len);
+                else
+                    return -1;
+            }
+            else
+                return -1;
+        }
 
         auto cur_channel = ch_opt.value();
         return cur_channel->write_bytes_from_application(buf, len);
@@ -229,6 +247,10 @@ public:
 
     // for i session control
 
+    void on_server_disconnected() override
+    {
+        server_closed.store(true);
+    }
     void on_transport_receive(std::unique_ptr<rudp_protocol_packet> pkt) override
     {
         rudp_protocol::channel_manager_header cm_header = deserialize_channel_manager_header(*pkt);
@@ -236,11 +258,7 @@ public:
 
         if (ch_opt)
             ch_opt.value()->on_transport_receive(std::move(pkt));
-    }
-
-    void set_timer_manager(std::shared_ptr<timer_manager> timer_man) { global_timers_manager = timer_man; }
-    void set_session_control(std::shared_ptr<i_channel_manager_callback> ses_control)
-    {
-        session_control_ = ses_control;
+        else if (channels.contains(cm_header.ch_id) && create_new_active_channel(cm_header.ch_id) != nullptr)
+            on_transport_receive(std::move(pkt));
     }
 };

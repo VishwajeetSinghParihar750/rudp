@@ -13,13 +13,16 @@
 #include <sys/socket.h>
 #include "sys/ioctl.h"
 
-#include "i_udp_callback.hpp"
+#include "i_session_control_for_udp.hpp"
 #include "rudp_protocol_packet.hpp"
 #include "transport_addr.hpp"
+#include "i_udp_for_session_control.hpp"
 
-class udp
+class i_client;
+
+class udp : public i_udp_for_session_control
 {
-    std::weak_ptr<i_udp_callback> session_control_;
+    std::weak_ptr<i_session_control_for_udp> session_control_;
 
     int socket_fd = -1;
     int epoll_fd = -1;
@@ -90,7 +93,7 @@ class udp
 
         constexpr int MAX_EVENTS = 2048;
         epoll_event event, events[MAX_EVENTS];
-        std::shared_ptr<i_udp_callback> session_control_sp;
+        std::shared_ptr<i_session_control_for_udp> session_control_sp;
 
         int event_cnt = 0;
         while (!token.stop_requested())
@@ -140,6 +143,15 @@ class udp
     }
 
 public:
+    // selective access
+    class client_setup_access_key
+    {
+        friend std::shared_ptr<i_client> create_client(const char *, const char *);
+
+    private:
+        client_setup_access_key() {}
+    };
+
     udp(const char *host, const char *port) // like "4004"
     {
         connect_socket(host, port);
@@ -160,7 +172,7 @@ public:
         close(epoll_fd);
     }
 
-    ssize_t send_packet_to_network(const transport_addr &addr, const char *buf, const size_t &len)
+    ssize_t send_packet_to_network(const char *buf, const size_t &len) override
     {
         return send(
             socket_fd,
@@ -168,7 +180,7 @@ public:
             0);
     }
 
-    void set_sesion_control(std::weak_ptr<i_udp_callback> cm)
+    void set_sesion_control(std::weak_ptr<i_session_control_for_udp> cm, client_setup_access_key)
     {
         session_control_ = cm;
     }

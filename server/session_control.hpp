@@ -2,21 +2,22 @@
 
 #include <unordered_map>
 #include <memory>
-
+#include <mutex>
 #include <atomic>
 
 #include "rudp_protocol_packet.hpp"
-#include "i_udp_callback.hpp"
-#include "i_session_control_callback.hpp"
-#include "i_channel_manager_callback.hpp"
+#include "i_udp_for_session_control.hpp"
+#include "i_session_control_for_channel_manager.hpp"
+#include "i_session_control_for_udp.hpp"
+#include "i_channel_manager_for_session_control.hpp"
+
 #include "transport_addr.hpp"
 #include "rudp_protocol.hpp"
 #include "timer_manager.hpp"
 #include "thread_safe_unordered_map.hpp"
 #include "types.hpp"
-#include <mutex>
 
-inline std::recursive_mutex g_connection_state_machine_mutex;
+class i_server;
 
 enum class CONNECTION_STATE
 {
@@ -37,6 +38,8 @@ enum class CONTROL_PACKET_HEADER_FLAGS : uint8_t
 
 struct connection_state_machine : public std::enable_shared_from_this<connection_state_machine>
 {
+    std::recursive_mutex g_connection_state_machine_mutex;
+
     static constexpr uint32_t ROUND_TRIP_TIME = 2000; // ℹ️ NEED TO KNOWx`
 
     std::atomic<CONNECTION_STATE> current_state = CONNECTION_STATE::LISTEN;
@@ -71,7 +74,7 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
     to_send_response last_response;
     TimerInfoTimePoint last_ack_send_time;
 
-    bool can_exchange_data() const
+    bool can_exchange_data()
     {
         std::lock_guard<std::recursive_mutex> lg(g_connection_state_machine_mutex);
         return current_state.load() == CONNECTION_STATE::ESTABLISHED;
@@ -132,7 +135,7 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
                 if (sp == nullptr or --retries == 0)
                     return;
 
-                std::lock_guard<std::recursive_mutex> lg(g_connection_state_machine_mutex);
+                std::lock_guard<std::recursive_mutex> lg(sp->g_connection_state_machine_mutex);
                 if (sp->current_state.load() == CONNECTION_STATE::LAST_ACK)
                 {
                     sp->last_response = {sp->get_fin_flag(), true};
@@ -205,7 +208,8 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
                     if (sp == nullptr or --retries == 0)
                         return;
 
-                    std::lock_guard<std::recursive_mutex> lg(g_connection_state_machine_mutex);
+                    std::lock_guard<std::recursive_mutex> lg(sp->g_connection_state_machine_mutex);
+
                     duration_ms time_spent = std::chrono::duration_cast<duration_ms>(std::chrono::steady_clock::now() - sp->last_ack_send_time);
                     if (time_spent < duration_ms(connection_state_machine::ROUND_TRIP_TIME * 2))
                     {
@@ -260,13 +264,13 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
     }
 };
 
-class session_control : public i_udp_callback, public i_channel_manager_callback, public std::enable_shared_from_this<session_control>
+class session_control : public i_session_control_for_udp, public i_session_control_for_channel_manager, public std::enable_shared_from_this<session_control>
 {
     std::atomic<bool> server_closed = false;
 
     std::shared_ptr<timer_manager> global_timer_manager;
-    std::shared_ptr<i_udp_callback> udp_ptr;
-    std::weak_ptr<i_session_control_callback> channel_manager_ptr;
+    std::shared_ptr<i_udp_for_session_control> udp_ptr;
+    std::weak_ptr<i_channel_manager_for_session_control> channel_manager_ptr;
     thread_safe_unordered_map<transport_addr, client_id, transport_addr_hasher> clients_addr_to_id;
     thread_safe_unordered_map<client_id, transport_addr> clients_id_to_addr;
     thread_safe_unordered_map<client_id, std::shared_ptr<connection_state_machine>> clients_fsm;
@@ -404,15 +408,25 @@ class session_control : public i_udp_callback, public i_channel_manager_callback
     }
 
 public:
-    void set_timer_manager(std::shared_ptr<timer_manager> timer_man) { global_timer_manager = timer_man; }
-    void set_udp(std::shared_ptr<i_udp_callback> udp_ptr_)
+    // selective access
+    class server_setup_access_key
+    {
+        friend std::shared_ptr<i_server> create_server(const char *);
+
+    private:
+        server_setup_access_key() {}
+    };
+
+    void set_timer_manager(std::shared_ptr<timer_manager> timer_man, server_setup_access_key) { global_timer_manager = timer_man; }
+    void set_udp(std::shared_ptr<i_udp_for_session_control> udp_ptr_, server_setup_access_key)
     {
         udp_ptr = udp_ptr_;
     }
-    void set_channel_manager(std::weak_ptr<i_session_control_callback> channel_manager_)
+    void set_channel_manager(std::weak_ptr<i_channel_manager_for_session_control> channel_manager_, server_setup_access_key)
     {
         channel_manager_ptr = channel_manager_;
     }
+
     void on_close_server() override
     {
         server_closed.store(true);

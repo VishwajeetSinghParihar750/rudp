@@ -21,10 +21,9 @@
 #include "rudp_protocol.hpp"
 #include "channels/realible_ordered_channel/reliable_ordered_channel.hpp"
 #include "i_server.hpp"
-#include "i_udp_callback.hpp"
-#include "i_session_control_callback.hpp"
+#include "i_channel_manager_for_session_control.hpp"
 #include "thread_safe_priority_queue.hpp"
-#include "i_channel_manager_callback.hpp"
+#include "i_session_control_for_channel_manager.hpp"
 #include "timer_manager.hpp"
 
 enum class READ_FROM_CHANNEL_ERROR : ssize_t
@@ -50,7 +49,7 @@ struct rcv_ready_queue_info
     }
 };
 
-class channel_manager : public i_server, public i_session_control_callback, public std::enable_shared_from_this<channel_manager>
+class channel_manager : public i_server, public i_channel_manager_for_session_control, public std::enable_shared_from_this<channel_manager>
 {
 
     static constexpr uint32_t MAX_CHANNELS = 2048;
@@ -98,7 +97,7 @@ class channel_manager : public i_server, public i_session_control_callback, publ
         return {static_cast<channel_id>(nch_id)};
     }
 
-    std::shared_ptr<i_channel_manager_callback> session_control_;
+    std::shared_ptr<i_session_control_for_channel_manager> session_control_;
 
     std::shared_ptr<i_channel> create_new_channel_for_client(client_id cl_id, channel_id ch_id)
     {
@@ -155,6 +154,15 @@ class channel_manager : public i_server, public i_session_control_callback, publ
     }
 
 public:
+    // selective access
+    class server_setup_access_key
+    {
+        friend std::shared_ptr<i_server> create_server(const char *);
+
+    private:
+        server_setup_access_key() {}
+    };
+    //
     // for i_server
     void add_channel(channel_id ch_id, channel_type type) override
     {
@@ -288,8 +296,9 @@ public:
     {
         pending_disconnects.insert(cl_id);
     }
-    void set_timer_manager(std::shared_ptr<timer_manager> timer_man) { global_timers_manager = timer_man; }
-    void set_session_control(std::shared_ptr<i_channel_manager_callback> ses_control)
+
+    void set_timer_manager(std::shared_ptr<timer_manager> timer_man, server_setup_access_key) { global_timers_manager = timer_man; }
+    void set_session_control(std::shared_ptr<i_session_control_for_channel_manager> ses_control, server_setup_access_key)
     {
         session_control_ = ses_control;
     }

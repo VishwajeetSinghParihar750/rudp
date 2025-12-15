@@ -4,10 +4,10 @@
 
 class rudp_protocol_packet;
 
-class i_session_control_callback
+class i_channel_manager_for_session_control
 {
 public:
-    virtual ~i_session_control_callback() = default;
+    virtual ~i_channel_manager_for_session_control() = default;
 
     virtual void add_client(const client_id &cl_id) = 0;
     virtual void remove_client(const client_id &cl_id) = 0;
