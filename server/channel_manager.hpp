@@ -61,34 +61,36 @@ class channel_manager : public i_server, public i_session_control_callback, publ
 
     using channel_map_t = thread_safe_unordered_map<channel_id, std::shared_ptr<i_channel>>;
     thread_safe_unordered_map<client_id, std::shared_ptr<channel_map_t>> per_client_channels;
-    /*
-        Each client's channel map is a thread-safe map of shared_ptr<i_channel>.
-        Access to per_client_channels and each inner channel_map_t is synchronized.
-    */
 
     thread_safe_unordered_set<client_id> pending_disconnects;
 
     void serialize_channel_manager_header(rudp_protocol_packet &pkt, const rudp_protocol::channel_manager_header &c_header)
     {
-        char *buf = pkt.get_buffer();
-        size_t len = pkt.get_length();
-        // ⚠️ need to implement rdup protocol packet first then get correct offset
+        const size_t off = rudp_protocol::CHANNEL_MANAGER_HEADER_OFFSET;
+        const size_t sz = rudp_protocol::CHANNEL_MANAGER_HEADER_SIZE;
 
-        assert(len >= rudp_protocol::CHANNEL_MANAGER_HEADER_SIZE);
-        uint16_t nch_id = static_cast<uint16_t>(c_header.ch_id);
-        nch_id = htons(nch_id);
-        memcpy(buf, &nch_id, sizeof(uint16_t));
+        assert(pkt.get_capacity() < off + sz);
+
+        uint32_t nch_id = static_cast<uint32_t>(c_header.ch_id);
+        uint32_t net = htonl(nch_id);
+        memcpy(pkt.get_buffer() + off, &net, sizeof(net));
+
+        if (pkt.get_length() < off + sz)
+            pkt.set_length(off + sz);
     }
+
     rudp_protocol::channel_manager_header deserialize_channel_manager_header(rudp_protocol_packet &pkt)
     {
-        char *buf = pkt.get_buffer();
-        size_t len = pkt.get_length();
-        // ⚠️ need to implement rdup protocol packet first then get correct offset
+        const size_t off = rudp_protocol::CHANNEL_MANAGER_HEADER_OFFSET;
+        const size_t sz = rudp_protocol::CHANNEL_MANAGER_HEADER_SIZE;
 
-        assert(len >= rudp_protocol::CHANNEL_MANAGER_HEADER_SIZE);
-        uint16_t nch_id = *reinterpret_cast<const uint16_t *>(buf);
-        nch_id = ntohs(nch_id);
-        return {nch_id};
+        assert(pkt.get_length() >= off + sz);
+
+        const char *buf = pkt.get_const_buffer();
+        uint32_t net = 0;
+        memcpy(&net, buf + off, sizeof(net));
+        uint32_t nch_id = ntohl(net);
+        return {static_cast<channel_id>(nch_id)};
     }
 
     std::shared_ptr<i_channel_manager_callback> session_control_;
@@ -164,6 +166,7 @@ public:
     void close_server() override
     {
         session_control_->on_close_server(); // now nothing should come to me from server, and if application tries to read or write after calling close, its undefined from my side
+        // my things will get remvoed in destructor iteslf
     }
 
     ssize_t read_from_channel_nonblocking(channel_id &channel_id_, client_id &client_id_, char *buf, const size_t len) override

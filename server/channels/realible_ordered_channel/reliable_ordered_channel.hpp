@@ -6,6 +6,7 @@
 #include "../../types.hpp"
 #include "../../timer_info.hpp"
 #include "../../timer_manager.hpp"
+
 #include <map>
 #include <deque>
 #include <cstring>
@@ -59,6 +60,7 @@ inline uint32_t fold_checksum(uint32_t sum)
         sum = (sum & 0xFFFF) + (sum >> 16);
     return sum;
 }
+
 class packet_codec
 {
 public:
@@ -543,7 +545,7 @@ private:
         auto cb = [this]()
         { this->on_rto_expire(); };
         auto timer = std::make_unique<timer_info>(duration_ms(ordered_channel_config::RTO_MS), cb);
-        global_timer_manager->add_timer(duration_ms(ordered_channel_config::RTO_MS), std::move(timer));
+        global_timer_manager->add_timer(std::move(timer));
     }
 
     void schedule_keepalive_timer()
@@ -554,7 +556,7 @@ private:
         auto cb = [this]()
         { this->on_keepalive_expire(); };
         auto timer = std::make_unique<timer_info>(duration_ms(KEEPALIVE_INTERVAL_MS), cb);
-        global_timer_manager->add_timer(duration_ms(KEEPALIVE_INTERVAL_MS), std::move(timer));
+        global_timer_manager->add_timer(std::move(timer));
     }
 
     void schedule_delayed_ack_timer()
@@ -565,7 +567,7 @@ private:
         auto cb = [this]()
         { this->on_delayed_ack_expire(); };
         auto timer = std::make_unique<timer_info>(duration_ms(DELAYED_ACK_MS), cb);
-        global_timer_manager->add_timer(duration_ms(DELAYED_ACK_MS), std::move(timer));
+        global_timer_manager->add_timer(std::move(timer));
     }
 
     void schedule_fin_wait_timer()
@@ -576,7 +578,7 @@ private:
         auto cb = [this]()
         { this->on_fin_wait_expire(); };
         auto timer = std::make_unique<timer_info>(duration_ms(FIN_WAIT_MS), cb);
-        global_timer_manager->add_timer(duration_ms(FIN_WAIT_MS), std::move(timer));
+        global_timer_manager->add_timer(std::move(timer));
     }
 
 public:
@@ -592,8 +594,15 @@ public:
         if (!pkt)
             return;
 
-        const char *ibuf = pkt->get_buffer();
-        uint32_t sz = pkt->get_length();
+        const size_t off = rudp_protocol::CHANNEL_HEADER_OFFSET;
+        const char *buf = pkt->get_const_buffer();
+        size_t len = pkt->get_length();
+
+        if (len <= off)
+            return; // nothing for channel layer
+
+        const char *ibuf = buf + off;
+        uint32_t sz = static_cast<uint32_t>(len - off);
 
         channel_header header{};
         if (!rcv_window.receive_packet(ibuf, sz, header))
@@ -605,7 +614,7 @@ public:
         if ((header.flags & static_cast<uint16_t>(channel_flags::WIND_SZ)) != 0)
             snd_window.process_window_update(header.win_sz);
 
-        uint32_t payload_len = sz - ordered_channel_config::HEADER_SIZE;
+        uint32_t payload_len = (sz > ordered_channel_config::HEADER_SIZE) ? (sz - ordered_channel_config::HEADER_SIZE) : 0;
         if (payload_len > 0 && on_app_data_ready)
             on_app_data_ready();
 
