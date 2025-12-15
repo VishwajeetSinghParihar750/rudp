@@ -55,7 +55,7 @@ class channel_manager : public i_client, public i_channel_manager_for_session_co
 
     static constexpr uint32_t MAX_CHANNELS = 2048;
 
-    std::shared_ptr<thread_safe_priority_queue<rcv_ready_queue_info, std::vector<rcv_ready_queue_info>, std::greater<rcv_ready_queue_info>>> ready_to_rcv_queue;
+    thread_safe_priority_queue<rcv_ready_queue_info, std::vector<rcv_ready_queue_info>, std::greater<rcv_ready_queue_info>> ready_to_rcv_queue;
 
     std::shared_ptr<timer_manager> global_timers_manager;
     std::unordered_map<channel_id, channel_type> channels;
@@ -72,10 +72,10 @@ class channel_manager : public i_client, public i_channel_manager_for_session_co
 
     void serialize_channel_manager_header(rudp_protocol_packet &pkt, const rudp_protocol::channel_manager_header &c_header)
     {
-        const size_t off = rudp_protocol::CHANNEL_MANAGER_HEADER_OFFSET;
-        const size_t sz = rudp_protocol::CHANNEL_MANAGER_HEADER_SIZE;
+        const size_t off = rudp_protocol_packet::CHANNEL_MANAGER_HEADER_OFFEST;
+        const size_t sz = rudp_protocol_packet::CHANNEL_MANAGER_HEADER_SIZE;
 
-        assert(pkt.get_capacity() < off + sz);
+        assert(pkt.get_capacity() >= off + sz);
 
         uint32_t nch_id = static_cast<uint32_t>(c_header.ch_id);
         uint32_t net = htonl(nch_id);
@@ -121,7 +121,7 @@ class channel_manager : public i_client, public i_channel_manager_for_session_co
                         rcv_ready_queue_info info;
                         info.ch_id = ch_id;
                         info.time = std::chrono::steady_clock::now();
-                        sp->ready_to_rcv_queue->push(std::move(info));
+                        sp->ready_to_rcv_queue.push(std::move(info));
                     }
                 });
 
@@ -132,6 +132,7 @@ class channel_manager : public i_client, public i_channel_manager_for_session_co
                         sp->on_transport_send(ch_id, std::move(pkt));
                 });
 
+            active_channels.insert(ch_id, ch);
             return ch;
         }
 
@@ -142,6 +143,7 @@ class channel_manager : public i_client, public i_channel_manager_for_session_co
 
     void on_transport_send(const channel_id &ch_id, std::unique_ptr<rudp_protocol_packet> pkt)
     {
+
         serialize_channel_manager_header(*pkt, ch_id);
         session_control_->on_transport_send_data(std::move(pkt));
     }
@@ -192,7 +194,7 @@ public:
         }
 
         rcv_ready_queue_info info;
-        bool result = ready_to_rcv_queue->pop(info);
+        bool result = ready_to_rcv_queue.pop(info);
         if (!result)
             return (ssize_t)READ_FROM_CHANNEL_ERROR::NO_PENDING_DATA;
 
@@ -220,7 +222,7 @@ public:
                 return (ssize_t)READ_FROM_CHANNEL_ERROR::SERVER_DISCONNECTED;
             }
 
-            auto result = ready_to_rcv_queue->wait_for_and_pop(info, duration_ms(100));
+            auto result = ready_to_rcv_queue.wait_for_and_pop(info, duration_ms(100));
 
             if (result)
             {
@@ -243,7 +245,9 @@ public:
             if (channels.contains(channel_id_))
             {
                 if (create_new_active_channel(channel_id_) != nullptr)
+                {
                     return write_to_channel(channel_id_, buf, len);
+                }
                 else
                     return -1;
             }

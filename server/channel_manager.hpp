@@ -54,7 +54,7 @@ class channel_manager : public i_server, public i_channel_manager_for_session_co
 
     static constexpr uint32_t MAX_CHANNELS = 2048;
 
-    std::shared_ptr<thread_safe_priority_queue<rcv_ready_queue_info, std::vector<rcv_ready_queue_info>, std::greater<rcv_ready_queue_info>>> ready_to_rcv_queue;
+    thread_safe_priority_queue<rcv_ready_queue_info, std::vector<rcv_ready_queue_info>, std::greater<rcv_ready_queue_info>> ready_to_rcv_queue;
 
     std::shared_ptr<timer_manager> global_timers_manager;
     std::unordered_map<channel_id, channel_type> channels;
@@ -122,7 +122,7 @@ class channel_manager : public i_server, public i_channel_manager_for_session_co
                         info.ch_id = ch_id;
                         info.cl_id = cl_id;
                         info.time = std::chrono::steady_clock::now();
-                        sp->ready_to_rcv_queue->push(std::move(info));
+                        sp->ready_to_rcv_queue.push(std::move(info));
                     }
                 });
 
@@ -194,7 +194,7 @@ public:
         }
 
         rcv_ready_queue_info info;
-        bool result = ready_to_rcv_queue->pop(info);
+        bool result = ready_to_rcv_queue.pop(info);
         if (!result)
             return (ssize_t)READ_FROM_CHANNEL_ERROR::NO_PENDING_DATA;
 
@@ -229,11 +229,14 @@ public:
 
                 return (ssize_t)READ_FROM_CHANNEL_ERROR::CLIENT_DISCONNECTED;
             }
+            // std::cout << 2 << std::endl;
 
-            auto result = ready_to_rcv_queue->wait_for_and_pop(info, duration_ms(100));
+            auto result = ready_to_rcv_queue.wait_for_and_pop(info, duration_ms(100));
 
+            // std::cout << 3 << std::endl;
             if (result)
             {
+                // std::cout << 4 << std::endl;
                 client_id_ = info.cl_id;
                 channel_id_ = info.ch_id;
 
