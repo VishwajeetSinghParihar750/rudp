@@ -66,6 +66,8 @@ class channel_manager : public i_client, public i_channel_manager_for_session_co
 
     thread_safe_unordered_map<channel_id, std::shared_ptr<i_channel>> active_channels;
 
+    std::shared_ptr<i_session_control_for_channel_manager> session_control_;
+
     std::atomic<bool> server_closed = false;
 
     void serialize_channel_manager_header(rudp_protocol_packet &pkt, const rudp_protocol::channel_manager_header &c_header)
@@ -96,8 +98,6 @@ class channel_manager : public i_client, public i_channel_manager_for_session_co
         uint32_t nch_id = ntohl(net);
         return {static_cast<channel_id>(nch_id)};
     }
-
-    std::shared_ptr<i_session_control_for_channel_manager> session_control_;
 
     std::shared_ptr<i_channel> create_new_active_channel(channel_id ch_id)
     {
@@ -155,6 +155,14 @@ class channel_manager : public i_client, public i_channel_manager_for_session_co
     }
 
 public:
+    // selective access
+    class client_setup_access_key
+    {
+        friend std::shared_ptr<i_client> create_client(const char *, const char *);
+
+    private:
+        client_setup_access_key() {}
+    };
     // for i_client
     void add_channel(channel_id ch_id, channel_type type) override
     {
@@ -196,6 +204,8 @@ public:
         auto cur_channel_opt = active_channels.get(channel_id_);
         if (cur_channel_opt)
             return cur_channel_opt.value()->read_bytes_to_application(buf, len);
+
+        return read_from_channel_nonblocking(channel_id_, buf, len);
     }
 
     ssize_t read_from_channel_blocking(channel_id &channel_id_, char *buf, const size_t len) override
@@ -260,5 +270,11 @@ public:
             ch_opt.value()->on_transport_receive(std::move(pkt));
         else if (channels.contains(cm_header.ch_id) && create_new_active_channel(cm_header.ch_id) != nullptr)
             on_transport_receive(std::move(pkt));
+    }
+
+    void set_timer_manager(std::shared_ptr<timer_manager> timer_man, client_setup_access_key) { global_timers_manager = timer_man; }
+    void set_session_control(std::shared_ptr<i_session_control_for_channel_manager> ses_control, client_setup_access_key)
+    {
+        session_control_ = ses_control;
     }
 };

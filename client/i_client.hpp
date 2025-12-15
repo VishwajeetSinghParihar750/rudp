@@ -11,7 +11,7 @@ class i_client
 public:
     virtual void close_client() = 0;
 
-    virtual void add_channel(channel_id, channel_type);
+    virtual void add_channel(channel_id, channel_type) = 0;
 
     virtual ssize_t read_from_channel_nonblocking(channel_id &channel_id_, char *buf, const size_t len) = 0;
     // wait for something to come

@@ -9,7 +9,6 @@
 
 inline std::shared_ptr<i_server> create_server(const char *PORT)
 {
-    // Create channel manager (which manages timers and session control internally)
     auto channel_manager_ = std::make_shared<channel_manager>();
     auto session_control_ = std::make_shared<session_control>();
     auto udp_ = std::make_shared<udp>(PORT);
