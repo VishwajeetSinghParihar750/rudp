@@ -14,15 +14,15 @@
 #include <chrono>
 
 #include "types.hpp"
-#include "thread_safe_unordered_map.hpp"
-#include "thread_safe_unordered_set.hpp"
+#include "common/thread_safe_unordered_map.hpp"
+#include "common/thread_safe_unordered_set.hpp"
 #include "i_channel.hpp"
 #include "udp.hpp"
 #include "rudp_protocol.hpp"
 #include "channels/realible_ordered_channel/reliable_ordered_channel.hpp"
 #include "i_server.hpp"
 #include "i_channel_manager_for_session_control.hpp"
-#include "thread_safe_priority_queue.hpp"
+#include "common/thread_safe_priority_queue.hpp"
 #include "i_session_control_for_channel_manager.hpp"
 #include "timer_manager.hpp"
 

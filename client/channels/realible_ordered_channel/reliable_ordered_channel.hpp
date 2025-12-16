@@ -1,7 +1,7 @@
 #pragma once
 
 #include "../../i_channel.hpp"
-#include "../../rudp_protocol_packet.hpp"
+#include "../../common/rudp_protocol_packet.hpp"
 #include "../../rudp_protocol.hpp"
 #include "../../types.hpp"
 #include "../../timer_info.hpp"

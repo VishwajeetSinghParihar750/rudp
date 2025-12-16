@@ -3,7 +3,7 @@
 #include <thread>
 #include <memory>
 
-#include "thread_safe_priority_queue.hpp"
+#include "common/thread_safe_priority_queue.hpp"
 #include "timer_info.hpp"
 
 using timer_info_ptr = std::shared_ptr<timer_info>;
