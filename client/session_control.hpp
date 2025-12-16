@@ -15,7 +15,7 @@
 #include "i_session_control_for_channel_manager.hpp"
 #include "transport_addr.hpp"
 #include "rudp_protocol.hpp"
-#include "timer_manager.hpp"
+#include "../common/timer_manager.hpp"
 #include "../common/thread_safe_unordered_map.hpp"
 #include "types.hpp"
 #include "../common/logger.hpp"
@@ -202,29 +202,23 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
 
             std::weak_ptr<connection_state_machine> self_weak_ptr = shared_from_this();
 
-            std::function<void()> cb = [self_weak_ptr, cb, retries = 5]() mutable -> void
+            std::function<void()> cb = [self_weak_ptr]() -> void
             {
                 auto sp = self_weak_ptr.lock();
-                if (sp == nullptr or --retries == 0)
+                if (sp == nullptr)
                 {
-                    if (sp != nullptr)
-                        logger::getInstance().logWarning("LAST_ACK retransmission timer expired. Assuming connection closed.");
                     return;
                 }
 
                 std::lock_guard<std::recursive_mutex> lg(sp->g_connection_state_machine_mutex);
                 if (sp->current_state.load() == CONNECTION_STATE::LAST_ACK)
                 {
-                    std::ostringstream oss;
-                    oss << "LAST_ACK state. Retrying FIN (retry " << (5 - retries) << ").";
-                    logger::getInstance().logWarning(oss.str());
                     sp->last_response = {sp->get_fin_flag(), true};
                     sp->send_response_to_network_without_piggybacking();
-                    sp->global_timer_manager->add_timer(std::make_unique<timer_info>(duration_ms(ROUND_TRIP_TIME * 2), cb));
                 }
             };
 
-            global_timer_manager->add_timer(std::make_unique<timer_info>(duration_ms(ROUND_TRIP_TIME * 2), cb));
+            add_timer_with_retries_exponential(global_timer_manager, duration_ms(ROUND_TRIP_TIME * 2), cb, 5);
 
             return {false, false};
         }
@@ -244,6 +238,7 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
 
     fsm_result handle_change(uint8_t rcvd_flags)
     {
+
         std::lock_guard<std::recursive_mutex> lg(g_connection_state_machine_mutex);
 
         std::ostringstream oss_rcv;
@@ -302,15 +297,11 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
 
                 std::weak_ptr<connection_state_machine> this_weak_ptr = shared_from_this();
 
-                std::function<void()> cb = [this_weak_ptr, cb, retries = 5]() mutable -> void
+                std::function<void()> cb = [this_weak_ptr]() -> void
                 {
                     auto sp = this_weak_ptr.lock();
-                    if (sp == nullptr or --retries == 0)
-                    {
-                        if (sp != nullptr)
-                            logger::getInstance().logWarning("TIME_WAIT timer expired. Forcing CLOSED state.");
+                    if (sp == nullptr)
                         return;
-                    }
 
                     std::lock_guard<std::recursive_mutex> lg(sp->g_connection_state_machine_mutex);
                     duration_ms time_spent = std::chrono::duration_cast<duration_ms>(std::chrono::steady_clock::now() - sp->last_ack_send_time);
@@ -318,10 +309,6 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
                     {
                         sp->last_response = {sp->get_ack_flag(), true};
                         sp->send_response_to_network_without_piggybacking();
-                        sp->global_timer_manager->add_timer(std::make_unique<timer_info>(duration_ms(connection_state_machine::ROUND_TRIP_TIME * 2), cb));
-                        std::ostringstream oss;
-                        oss << "TIME_WAIT: Re-sending ACK (Time spent: " << time_spent.count() << "ms).";
-                        logger::getInstance().logInfo(oss.str());
                     }
                     else
                     {
@@ -330,7 +317,7 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
                     }
                 };
 
-                global_timer_manager->add_timer(std::make_unique<timer_info>(duration_ms(connection_state_machine::ROUND_TRIP_TIME * 2), cb));
+                add_timer_with_retries_exponential(global_timer_manager, duration_ms(ROUND_TRIP_TIME * 2), cb, 5);
 
                 return {false, true};
             }
@@ -489,12 +476,12 @@ public:
     void set_udp(std::shared_ptr<i_udp_for_session_control> udp_ptr_, client_setup_access_key)
     {
         udp_ptr = udp_ptr_;
+        initialize_fsm_after_dependencies();
     }
     void set_channel_manager(std::weak_ptr<i_channel_manager_for_session_control> channel_manager_, client_setup_access_key)
     {
         channel_manager_ptr = channel_manager_;
         // Now that all dependencies are set, initialize FSM (assuming client creation handles this)
-        initialize_fsm_after_dependencies();
     }
     void on_close_client() override
     {
@@ -503,6 +490,8 @@ public:
         connection_state_machine::fsm_result res = client_fsm->close();
         if (res.close_connection)
             trigger_teardown_step();
+
+        logger::getInstance().logInfo("Teardowncounter value : ." + std::to_string(teardown_counter->load()));
 
         if (teardown_counter->load() < 2)
         {
@@ -536,6 +525,12 @@ public:
         if (!client_fsm)
         {
             logger::getInstance().logCritical("Received packet but client_fsm is null. Dropping.");
+            return;
+        }
+
+        if (pkt->get_length() < rudp_protocol_packet::SESSION_CONTROL_HEADER_OFFSET + rudp_protocol_packet::SESSION_CONTROL_HEADER_SIZE)
+        {
+            logger::getInstance().logCritical("Received packet but too small for session control. Dropping.");
             return;
         }
 

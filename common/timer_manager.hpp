@@ -44,3 +44,34 @@ public:
         timer_manager_q.push(std::make_shared<timer_info>(*timer_ptr));
     }
 };
+
+inline void add_timer_with_retries_exponential(std::weak_ptr<timer_manager> timer_mgr_weak,
+                                               duration_ms initial_timeout,
+                                               std::function<void()> cb,
+                                               uint32_t max_retries,
+                                               float backoff_factor = 2.0f)
+{
+    auto timer_mgr = timer_mgr_weak.lock();
+    if (!timer_mgr || max_retries == 0)
+        return;
+
+    for (uint32_t i = 0; i < max_retries; i++)
+    {
+        // Calculate delay for this retry (exponential backoff)
+        auto delay = duration_ms(static_cast<int64_t>(
+            initial_timeout.count() * std::pow(backoff_factor, i)));
+
+        std::function<void()> retry_cb = [cb, retry_num = i + 1]()
+        {
+            logger::getInstance().logTest("Executing retry " +
+                                          std::to_string(retry_num));
+            cb();
+        };
+
+        timer_mgr->add_timer(std::make_unique<timer_info>(delay, retry_cb));
+
+        logger::getInstance().logTest("Scheduled retry " +
+                                      std::to_string(i + 1) + "/" + std::to_string(max_retries) +
+                                      " at " + std::to_string(delay.count()) + "ms");
+    }
+}

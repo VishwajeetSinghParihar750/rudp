@@ -24,7 +24,7 @@
 #include "i_channel_manager_for_session_control.hpp"
 #include "../common/thread_safe_priority_queue.hpp"
 #include "i_session_control_for_channel_manager.hpp"
-#include "timer_manager.hpp"
+#include "../common/timer_manager.hpp"
 #include "../common/logger.hpp"
 
 enum class READ_FROM_CHANNEL_ERROR : ssize_t
@@ -219,11 +219,12 @@ public:
     {
         logger::getInstance().logTest("Non-blocking read initiated.");
 
-        if (pending_disconnects.size() > 0)
+        if (auto disconnected_client = pending_disconnects.try_pop())
         {
-            client_id_ = pending_disconnects.pop();
+            client_id_ = *disconnected_client;
             channel_id_ = INVALID_CHANNEL_ID;
-            logger::getInstance().logInfo("Non-blocking read returning CLIENT_DISCONNECTED for client " + std::to_string(client_id_));
+            logger::getInstance().logInfo("Non-blocking read returning CLIENT_DISCONNECTED for client " +
+                                          std::to_string(client_id_));
             return (ssize_t)READ_FROM_CHANNEL_ERROR::CLIENT_DISCONNECTED;
         }
 
@@ -273,11 +274,12 @@ public:
 
         while (true)
         {
-            if (pending_disconnects.size() > 0)
+            if (auto disconnected_client = pending_disconnects.try_pop())
             {
-                client_id_ = pending_disconnects.pop();
+                client_id_ = *disconnected_client;
                 channel_id_ = INVALID_CHANNEL_ID;
-                logger::getInstance().logInfo("Blocking read returning CLIENT_DISCONNECTED for client " + std::to_string(client_id_));
+                logger::getInstance().logInfo("Non-blocking read returning CLIENT_DISCONNECTED for client " +
+                                              std::to_string(client_id_));
                 return (ssize_t)READ_FROM_CHANNEL_ERROR::CLIENT_DISCONNECTED;
             }
 
@@ -310,6 +312,7 @@ public:
             }
         }
     }
+
     ssize_t write_to_channel(const channel_id &channel_id_, const client_id &client_id_, const char *buf, const size_t len) override
     {
         logger::getInstance().logTest("Write to channel initiated: client " + std::to_string(client_id_) + " ch " + std::to_string(channel_id_) + " len " + std::to_string(len));

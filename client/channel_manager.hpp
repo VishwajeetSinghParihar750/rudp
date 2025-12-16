@@ -16,7 +16,6 @@
 
 #include "types.hpp"
 #include "../common/thread_safe_unordered_map.hpp"
-#include "../common/thread_safe_unordered_set.hpp"
 #include "i_channel.hpp"
 #include "udp.hpp"
 #include "rudp_protocol.hpp"
@@ -25,7 +24,7 @@
 #include "i_channel_manager_for_session_control.hpp"
 #include "../common/thread_safe_priority_queue.hpp"
 #include "i_session_control_for_channel_manager.hpp"
-#include "timer_manager.hpp"
+#include "../common/timer_manager.hpp"
 #include "../common/logger.hpp"
 
 enum class READ_FROM_CHANNEL_ERROR : ssize_t
@@ -219,9 +218,10 @@ public:
 
     void close_client() override
     {
+        logger::getInstance().logInfo("Client closing initiated by application.");
+
         session_control_->on_close_client(); // now nothing should come to me from server, and if application tries to read or write after calling close, its undefined from my side
         // my things will get remvoed in destructor iteslf
-        logger::getInstance().logInfo("Client closing initiated by application.");
     }
 
     ssize_t read_from_channel_nonblocking(channel_id &channel_id_, char *buf, const size_t len) override
@@ -319,6 +319,7 @@ public:
         auto ch_opt = active_channels.get(channel_id_);
         if (!ch_opt)
         {
+
             if (channels.contains(channel_id_))
             {
                 std::ostringstream oss;

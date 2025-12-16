@@ -4,8 +4,8 @@
 #include "../../../common/rudp_protocol_packet.hpp"
 #include "../../rudp_protocol.hpp"
 #include "../../types.hpp"
-#include "../../timer_info.hpp"
-#include "../../timer_manager.hpp"
+#include "../../../common/timer_info.hpp"
+#include "../../../common/timer_manager.hpp"
 #include "../../../common/logger.hpp"
 
 #include <map>
@@ -609,7 +609,7 @@ public:
     bool get_send_window() const { return should_send_window.load(std::memory_order_acquire); }
 };
 
-class reliable_ordered_channel : public i_channel
+class reliable_ordered_channel : public i_channel, public std::enable_shared_from_this<reliable_ordered_channel>
 {
 private:
     channel_id ch_id;
@@ -660,8 +660,17 @@ private:
             return;
         }
 
-        auto cb = [this]()
-        { this->on_rto_expire(); };
+        std::weak_ptr<reliable_ordered_channel> self_weak = weak_from_this();
+        auto cb = [self_weak]()
+        {
+            auto self = self_weak.lock();
+            if (!self)
+            {
+                logger::getInstance().logInfo("RTO timer expired but channel already destroyed");
+                return;
+            }
+            self->on_rto_expire();
+        };
         auto timer = std::make_unique<timer_info>(duration_ms(ordered_channel_config::RTO_MS), cb);
         global_timer_manager->add_timer(std::move(timer));
         logger::getInstance().logTest("RTO timer scheduled for " + std::to_string(ordered_channel_config::RTO_MS) + "ms.");
@@ -675,14 +684,80 @@ private:
             return;
         }
 
-        // NOTE: This implementation assumes a simple timer that can be overwritten
-        // or that the timer manager handles duplicate timers appropriately (e.g., uses a key/ID).
-        // Since we don't have a timer ID, we just add a new one.
-        auto cb = [this]()
-        { this->on_delayed_ack_expire(); };
+        std::weak_ptr<reliable_ordered_channel> self_weak = weak_from_this();
+        auto cb = [self_weak]()
+        {
+            auto self = self_weak.lock();
+            if (!self)
+            {
+                logger::getInstance().logInfo("Delayed ACK timer expired but channel already destroyed");
+                return;
+            }
+            self->on_delayed_ack_expire();
+        };
         auto timer = std::make_unique<timer_info>(duration_ms(DELAYED_ACK_MS), cb);
         global_timer_manager->add_timer(std::move(timer));
         logger::getInstance().logTest("Delayed ACK timer scheduled for " + std::to_string(DELAYED_ACK_MS) + "ms.");
+    }
+
+    std::unique_ptr<rudp_protocol_packet> on_transport_send()
+    {
+        uint32_t seq_no = 0;
+        char payload_buf[ordered_channel_config::MAX_MSS];
+        uint32_t max_payload = ordered_channel_config::MAX_MSS;
+        uint32_t payload_len = snd_window.get_packet_to_send(payload_buf, max_payload, seq_no);
+
+        bool send_ack = flags.get_send_ack() || rcv_window.is_ack_pending();
+        bool send_window = flags.get_send_window();
+
+        if (payload_len == 0 && !send_ack && !send_window)
+        {
+            logger::getInstance().logTest("on_transport_send: No data to send, no ACK/Window update needed. Returning nullptr.");
+            return nullptr;
+        }
+
+        uint32_t total_size = rudp_protocol_packet::CHANNEL_HEADER_OFFSET +
+                              ordered_channel_config::HEADER_SIZE + payload_len;
+        auto packet = std::make_unique<rudp_protocol_packet>(total_size);
+        packet->set_length(total_size);
+
+        char *pkt_buf = packet->get_buffer() + rudp_protocol_packet::CHANNEL_HEADER_OFFSET;
+
+        channel_header header{};
+        header.seq_no = seq_no;
+        header.ack_no = rcv_window.get_ack_no();
+        header.win_sz = rcv_window.get_window_size();
+        header.flags = 0;
+
+        if (send_ack)
+            header.flags |= static_cast<uint16_t>(channel_flags::ACK);
+        if (send_window)
+            header.flags |= static_cast<uint16_t>(channel_flags::WIND_SZ);
+
+        packet_codec::serialize_header(pkt_buf, header);
+
+        if (payload_len > 0)
+            memcpy(pkt_buf + ordered_channel_config::HEADER_SIZE, payload_buf, payload_len);
+
+        uint16_t csum_val = packet_codec::calculate_checksum(pkt_buf,
+                                                             ordered_channel_config::HEADER_SIZE + payload_len);
+        uint16_t final_csum = htons(~csum_val);
+        memcpy(pkt_buf + 12, &final_csum, 2);
+
+        rcv_window.clear_ack_pending();
+
+        std::string log_msg = "Sending packet: Seq=" + std::to_string(seq_no) +
+                              ", Ack=" + std::to_string(header.ack_no) +
+                              ", Win=" + std::to_string(header.win_sz);
+        if (payload_len > 0)
+            log_msg += ", Payload=" + std::to_string(payload_len) + " bytes (Data)";
+        if (send_ack)
+            log_msg += " (ACK)";
+        if (send_window)
+            log_msg += " (WIND_SZ)";
+        logger::getInstance().logInfo(log_msg);
+
+        return packet;
     }
 
 public:
@@ -753,66 +828,6 @@ public:
                 }
             }
         }
-    }
-
-    std::unique_ptr<rudp_protocol_packet> on_transport_send()
-    {
-        uint32_t seq_no = 0;
-        char payload_buf[ordered_channel_config::MAX_MSS];
-        uint32_t max_payload = ordered_channel_config::MAX_MSS;
-        uint32_t payload_len = snd_window.get_packet_to_send(payload_buf, max_payload, seq_no);
-
-        bool send_ack = flags.get_send_ack() || rcv_window.is_ack_pending();
-        bool send_window = flags.get_send_window();
-
-        if (payload_len == 0 && !send_ack && !send_window)
-        {
-            logger::getInstance().logTest("on_transport_send: No data to send, no ACK/Window update needed. Returning nullptr.");
-            return nullptr;
-        }
-
-        uint32_t total_size = rudp_protocol_packet::CHANNEL_HEADER_OFFSET +
-                              ordered_channel_config::HEADER_SIZE + payload_len;
-        auto packet = std::make_unique<rudp_protocol_packet>(total_size);
-        packet->set_length(total_size);
-
-        char *pkt_buf = packet->get_buffer() + rudp_protocol_packet::CHANNEL_HEADER_OFFSET;
-
-        channel_header header{};
-        header.seq_no = seq_no;
-        header.ack_no = rcv_window.get_ack_no();
-        header.win_sz = rcv_window.get_window_size();
-        header.flags = 0;
-
-        if (send_ack)
-            header.flags |= static_cast<uint16_t>(channel_flags::ACK);
-        if (send_window)
-            header.flags |= static_cast<uint16_t>(channel_flags::WIND_SZ);
-
-        packet_codec::serialize_header(pkt_buf, header);
-
-        if (payload_len > 0)
-            memcpy(pkt_buf + ordered_channel_config::HEADER_SIZE, payload_buf, payload_len);
-
-        uint16_t csum_val = packet_codec::calculate_checksum(pkt_buf,
-                                                             ordered_channel_config::HEADER_SIZE + payload_len);
-        uint16_t final_csum = htons(~csum_val);
-        memcpy(pkt_buf + 12, &final_csum, 2);
-
-        rcv_window.clear_ack_pending();
-
-        std::string log_msg = "Sending packet: Seq=" + std::to_string(seq_no) +
-                              ", Ack=" + std::to_string(header.ack_no) +
-                              ", Win=" + std::to_string(header.win_sz);
-        if (payload_len > 0)
-            log_msg += ", Payload=" + std::to_string(payload_len) + " bytes (Data)";
-        if (send_ack)
-            log_msg += " (ACK)";
-        if (send_window)
-            log_msg += " (WIND_SZ)";
-        logger::getInstance().logInfo(log_msg);
-
-        return packet;
     }
 
     ssize_t read_bytes_to_application(char *buf, const uint32_t &len) override
