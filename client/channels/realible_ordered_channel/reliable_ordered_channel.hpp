@@ -401,6 +401,16 @@ public:
         return true;
     }
 
+    uint32_t get_available_bytes_cnt()
+    {
+
+        std::lock_guard<std::mutex> guard(lock);
+        uint32_t current_rcv = rcv_nxt.get();
+        uint32_t current_app_read = app_read_seq.get();
+        uint32_t available = current_rcv - current_app_read;
+        return available;
+    }
+
     ssize_t read_data(char *out_buf, uint32_t len)
     {
         std::lock_guard<std::mutex> guard(lock);
@@ -622,9 +632,6 @@ private:
         auto pkt = on_transport_send();
         if (pkt && on_net_data_ready)
             on_net_data_ready(std::move(pkt));
-
-        // Reschedule RTO to keep checking for unacknowledged data
-        schedule_rto_timer();
     }
 
     void on_delayed_ack_expire()
@@ -748,7 +755,7 @@ public:
         }
     }
 
-    std::unique_ptr<rudp_protocol_packet> on_transport_send() override
+    std::unique_ptr<rudp_protocol_packet> on_transport_send()
     {
         uint32_t seq_no = 0;
         char payload_buf[ordered_channel_config::MAX_MSS];
@@ -764,12 +771,12 @@ public:
             return nullptr;
         }
 
-        uint32_t total_size = rudp_protocol::CHANNEL_HEADER_OFFSET +
+        uint32_t total_size = rudp_protocol_packet::CHANNEL_HEADER_OFFSET +
                               ordered_channel_config::HEADER_SIZE + payload_len;
         auto packet = std::make_unique<rudp_protocol_packet>(total_size);
         packet->set_length(total_size);
 
-        char *pkt_buf = packet->get_buffer() + rudp_protocol::CHANNEL_HEADER_OFFSET;
+        char *pkt_buf = packet->get_buffer() + rudp_protocol_packet::CHANNEL_HEADER_OFFSET;
 
         channel_header header{};
         header.seq_no = seq_no;
@@ -810,7 +817,10 @@ public:
 
     ssize_t read_bytes_to_application(char *buf, const uint32_t &len) override
     {
-        return rcv_window.read_data(buf, len);
+        auto ret = rcv_window.read_data(buf, len);
+        if (rcv_window.get_available_bytes_cnt() > 0 && on_app_data_ready)
+            on_app_data_ready();
+        return ret;
     }
 
     ssize_t write_bytes_from_application(const char *buf, const uint32_t &len) override
@@ -821,7 +831,10 @@ public:
             logger::getInstance().logInfo("Application wrote " + std::to_string(written) + " bytes. Attempting to send immediately.");
             auto pkt = on_transport_send();
             if (pkt && on_net_data_ready)
+            {
                 on_net_data_ready(std::move(pkt));
+                schedule_rto_timer();
+            }
         }
         else
         {
@@ -846,6 +859,5 @@ public:
     {
         global_timer_manager = timer_man;
         logger::getInstance().logInfo("Timer manager set. Scheduling initial timers.");
-        schedule_rto_timer();
     }
 };

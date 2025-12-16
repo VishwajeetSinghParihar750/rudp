@@ -50,7 +50,7 @@ struct channel_header
 inline uint64_t get_current_time_ms()
 {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
-                   std::chrono::steady_clock::now().time_since_epoch())
+               std::chrono::steady_clock::now().time_since_epoch())
         .count();
 }
 
@@ -66,7 +66,8 @@ class packet_codec
 public:
     static bool deserialize_header(const char *buf, uint32_t total_size, channel_header &out_header)
     {
-        if (total_size < ordered_channel_config::HEADER_SIZE) {
+        if (total_size < ordered_channel_config::HEADER_SIZE)
+        {
             logger::getInstance().logWarning("Failed to deserialize header: Total size too small (" + std::to_string(total_size) + ")");
             return false;
         }
@@ -77,7 +78,8 @@ public:
         out_header.flags = ntohs(*reinterpret_cast<const uint16_t *>(buf + 10));
         out_header.checksum = ntohs(*reinterpret_cast<const uint16_t *>(buf + 12));
 
-        if (!verify_checksum(buf, total_size, out_header.checksum)) {
+        if (!verify_checksum(buf, total_size, out_header.checksum))
+        {
             logger::getInstance().logWarning("Failed to deserialize header: Checksum mismatch. Packet dropped.");
             return false;
         }
@@ -255,7 +257,8 @@ public:
         std::lock_guard<std::mutex> guard(lock);
         uint64_t now = get_current_time_ms();
 
-        if (segments.empty()) {
+        if (segments.empty())
+        {
             return false;
         }
 
@@ -290,7 +293,8 @@ public:
             acknowledged_bytes += segments.front().length;
             segments.pop_front();
         }
-        if (acknowledged_bytes > 0) {
+        if (acknowledged_bytes > 0)
+        {
             logger::getInstance().logInfo("Acknowledged " + std::to_string(acknowledged_bytes) + " bytes. New SND_UNA=" + std::to_string(ack_no));
         }
     }
@@ -314,11 +318,12 @@ public:
 
     bool receive_packet(const char *packet, uint32_t packet_size, channel_header &out_header)
     {
-        if (!packet_codec::deserialize_header(packet, packet_size, out_header)) {
+        if (!packet_codec::deserialize_header(packet, packet_size, out_header))
+        {
             logger::getInstance().logWarning("Packet failed header deserialization (checksum fail or malformed).");
             return false;
         }
-        
+
         uint32_t payload_len = packet_size - ordered_channel_config::HEADER_SIZE;
         logger::getInstance().logTest("Received packet: Seq=" + std::to_string(out_header.seq_no) + ", Ack=" + std::to_string(out_header.ack_no) + ", Win=" + std::to_string(out_header.win_sz) + ", PayloadLen=" + std::to_string(payload_len));
 
@@ -336,17 +341,19 @@ public:
         uint32_t current_rcv_nxt = rcv_nxt.get();
         uint32_t app_read_pos = app_read_seq.get();
 
-        if (seg_end <= app_read_pos) {
+        if (seg_end <= app_read_pos)
+        {
             logger::getInstance().logInfo("Packet " + std::to_string(seg_start) + " is old/already read. Sending ACK.");
             ack_pending.store(true, std::memory_order_release);
             return true;
         }
 
-        if (seg_start >= app_read_pos + buffer.capacity()) {
+        if (seg_start >= app_read_pos + buffer.capacity())
+        {
             logger::getInstance().logWarning("Packet " + std::to_string(seg_start) + " is outside receive window (overflow). Dropped.");
             return false;
         }
-        
+
         // This check is the essence of reliability and ordering:
         if (seg_start == current_rcv_nxt)
         {
@@ -360,10 +367,13 @@ public:
         else if (seg_start > current_rcv_nxt)
         {
             // Out-of-order segment
-            if (out_of_order_segments.find(seg_start) == out_of_order_segments.end()) {
+            if (out_of_order_segments.find(seg_start) == out_of_order_segments.end())
+            {
                 out_of_order_segments[seg_start] = std::vector<char>(payload, payload + payload_len);
                 logger::getInstance().logWarning("Received out-of-order segment: Seq=" + std::to_string(seg_start) + ". Stored.");
-            } else {
+            }
+            else
+            {
                 logger::getInstance().logWarning("Received duplicate out-of-order segment: Seq=" + std::to_string(seg_start) + ". Dropped duplicate.");
             }
             ack_pending.store(true, std::memory_order_release);
@@ -380,13 +390,25 @@ public:
                 rcv_nxt.advance(new_data_len);
                 logger::getInstance().logWarning("Received partial overlap (retrans): Seg=" + std::to_string(seg_start) + ", New Data=" + std::to_string(new_data_len) + ". New RCV_NXT=" + std::to_string(rcv_nxt.get()));
                 advance_with_sack();
-            } else {
+            }
+            else
+            {
                 logger::getInstance().logInfo("Received full duplicate segment: Seq=" + std::to_string(seg_start) + ". Ignored data.");
             }
             ack_pending.store(true, std::memory_order_release);
         }
 
         return true;
+    }
+
+    uint32_t get_available_bytes_cnt()
+    {
+
+        std::lock_guard<std::mutex> guard(lock);
+        uint32_t current_rcv = rcv_nxt.get();
+        uint32_t current_app_read = app_read_seq.get();
+        uint32_t available = current_rcv - current_app_read;
+        return available;
     }
 
     ssize_t read_data(char *out_buf, uint32_t len)
@@ -396,7 +418,8 @@ public:
         uint32_t current_app_read = app_read_seq.get();
         uint32_t available = current_rcv - current_app_read;
 
-        if (available == 0) {
+        if (available == 0)
+        {
             logger::getInstance().logTest("Application read: 0 bytes available.");
             return 0;
         }
@@ -419,8 +442,10 @@ public:
     }
 
     bool is_ack_pending() const { return ack_pending.load(std::memory_order_acquire); }
-    void clear_ack_pending() { 
-        if (ack_pending.exchange(false, std::memory_order_release)) {
+    void clear_ack_pending()
+    {
+        if (ack_pending.exchange(false, std::memory_order_release))
+        {
             logger::getInstance().logTest("Cleared ACK pending flag.");
         }
     }
@@ -446,9 +471,10 @@ private:
                 break;
             }
         }
-        if (current_rcv > rcv_nxt.get()) {
-             rcv_nxt.set(current_rcv);
-             logger::getInstance().logInfo("RCV_NXT advanced with SACK consolidation. New RCV_NXT=" + std::to_string(rcv_nxt.get()));
+        if (current_rcv > rcv_nxt.get())
+        {
+            rcv_nxt.set(current_rcv);
+            logger::getInstance().logInfo("RCV_NXT advanced with SACK consolidation. New RCV_NXT=" + std::to_string(rcv_nxt.get()));
         }
     }
 };
@@ -479,7 +505,8 @@ public:
         uint32_t buffered = (current_write - current_una);
         uint32_t available = (total_capacity - 1) - buffered; // -1 to avoid head == tail ambiguity
 
-        if (available < len) {
+        if (available < len)
+        {
             logger::getInstance().logWarning("Application write failed: Not enough buffer space. Requested " + std::to_string(len) + ", Available " + std::to_string(available));
             return -1;
         }
@@ -514,7 +541,8 @@ public:
         if (available_to_send == 0)
             return 0;
 
-        if (!flow.can_send_bytes(in_flight)) {
+        if (!flow.can_send_bytes(in_flight))
+        {
             logger::getInstance().logTest("Cannot send new data: Remote window is full. InFlight=" + std::to_string(in_flight) + ", RemoteWin=" + std::to_string(remote_win));
             return 0;
         }
@@ -525,7 +553,8 @@ public:
                                       (uint32_t)ordered_channel_config::MAX_MSS,
                                       window_available});
 
-        if (can_send == 0) {
+        if (can_send == 0)
+        {
             logger::getInstance().logTest("Cannot send new data: Effective send size is 0. AvailToWrite=" + std::to_string(available_to_send) + ", WindowAvail=" + std::to_string(window_available));
             return 0;
         }
@@ -547,10 +576,14 @@ public:
             logger::getInstance().logInfo("Processing ACK: " + std::to_string(ack_no) + ". Current SND_UNA: " + std::to_string(current_una));
             snd_una.set(ack_no);
             retransmissions.acknowledge_up_to(ack_no);
-        } else if (ack_no < current_una) {
+        }
+        else if (ack_no < current_una)
+        {
             logger::getInstance().logWarning("Received old ACK: " + std::to_string(ack_no) + ". Current SND_UNA: " + std::to_string(current_una));
-        } else {
-             logger::getInstance().logTest("Received duplicate ACK: " + std::to_string(ack_no));
+        }
+        else
+        {
+            logger::getInstance().logTest("Received duplicate ACK: " + std::to_string(ack_no));
         }
     }
 
@@ -590,7 +623,7 @@ private:
 
     // === Timer Configuration ===
     static constexpr uint64_t KEEPALIVE_INTERVAL_MS = 30000; // 30 seconds
-    static constexpr uint64_t DELAYED_ACK_MS = 40;            // 40ms delayed ACK
+    static constexpr uint64_t DELAYED_ACK_MS = 40;           // 40ms delayed ACK
 
     // === Timer Handlers ===
     void on_rto_expire()
@@ -599,26 +632,6 @@ private:
         auto pkt = on_transport_send();
         if (pkt && on_net_data_ready)
             on_net_data_ready(std::move(pkt));
-
-        // Reschedule RTO to keep checking for unacknowledged data
-        schedule_rto_timer();
-    }
-
-    void on_keepalive_expire()
-    {
-        logger::getInstance().logInfo("Keepalive timer expired. Sending probe.");
-        // Send keepalive packet (ACK/Window update only, no data)
-        flags.set_send_ack(true);
-        flags.set_send_window(true);
-        auto pkt = on_transport_send();
-        if (pkt && on_net_data_ready)
-            on_net_data_ready(std::move(pkt));
-
-        flags.set_send_ack(false);
-        flags.set_send_window(false);
-
-        // Reschedule keepalive
-        schedule_keepalive_timer();
     }
 
     void on_delayed_ack_expire()
@@ -631,15 +644,18 @@ private:
             auto pkt = on_transport_send();
             if (pkt && on_net_data_ready)
                 on_net_data_ready(std::move(pkt));
-        } else {
-             logger::getInstance().logTest("Delayed ACK not pending. No packet sent.");
+        }
+        else
+        {
+            logger::getInstance().logTest("Delayed ACK not pending. No packet sent.");
         }
     }
 
     // === Timer Scheduling ===
     void schedule_rto_timer()
     {
-        if (!global_timer_manager) {
+        if (!global_timer_manager)
+        {
             logger::getInstance().logError("RTO Timer not scheduled: Timer Manager not set.");
             return;
         }
@@ -651,23 +667,10 @@ private:
         logger::getInstance().logTest("RTO timer scheduled for " + std::to_string(ordered_channel_config::RTO_MS) + "ms.");
     }
 
-    void schedule_keepalive_timer()
-    {
-        if (!global_timer_manager) {
-            logger::getInstance().logError("Keepalive Timer not scheduled: Timer Manager not set.");
-            return;
-        }
-
-        auto cb = [this]()
-        { this->on_keepalive_expire(); };
-        auto timer = std::make_unique<timer_info>(duration_ms(KEEPALIVE_INTERVAL_MS), cb);
-        global_timer_manager->add_timer(std::move(timer));
-        logger::getInstance().logTest("Keepalive timer scheduled for " + std::to_string(KEEPALIVE_INTERVAL_MS) + "ms.");
-    }
-
     void schedule_delayed_ack_timer()
     {
-        if (!global_timer_manager) {
+        if (!global_timer_manager)
+        {
             logger::getInstance().logError("Delayed ACK Timer not scheduled: Timer Manager not set.");
             return;
         }
@@ -683,7 +686,8 @@ private:
     }
 
 public:
-    explicit reliable_ordered_channel(channel_id id) : ch_id(id) {
+    explicit reliable_ordered_channel(channel_id id) : ch_id(id)
+    {
         logger::getInstance().logInfo("Reliable Ordered Channel " + std::to_string(ch_id) + " created.");
     }
 
@@ -709,7 +713,8 @@ public:
         uint32_t sz = static_cast<uint32_t>(len - off);
 
         channel_header header{};
-        if (!rcv_window.receive_packet(ibuf, sz, header)) {
+        if (!rcv_window.receive_packet(ibuf, sz, header))
+        {
             logger::getInstance().logWarning("Failed to process received packet in receive window. Dropped.");
             return;
         }
@@ -722,21 +727,27 @@ public:
 
         uint32_t payload_len = (sz > ordered_channel_config::HEADER_SIZE) ? (sz - ordered_channel_config::HEADER_SIZE) : 0;
 
-        if (payload_len > 0) {
+        if (payload_len > 0)
+        {
             logger::getInstance().logInfo("Received data payload (" + std::to_string(payload_len) + " bytes). Notifying application.");
             if (on_app_data_ready)
                 on_app_data_ready();
         }
 
         // Schedule delayed ACK on data receipt
-        if (rcv_window.is_ack_pending()) {
-            if (payload_len > 0) {
+        if (rcv_window.is_ack_pending())
+        {
+            if (payload_len > 0)
+            {
                 schedule_delayed_ack_timer();
-            } else {
+            }
+            else
+            {
                 // For ACK-only packets that update RCV_NXT (e.g., initial ACK), send immediate ACK back.
                 // Or if an ACK-only was received, we still respond to update our window.
                 auto pkt_to_send = on_transport_send();
-                if (pkt_to_send && on_net_data_ready) {
+                if (pkt_to_send && on_net_data_ready)
+                {
                     logger::getInstance().logTest("Received ACK-only packet, sending response immediately.");
                     on_net_data_ready(std::move(pkt_to_send));
                 }
@@ -744,7 +755,7 @@ public:
         }
     }
 
-    std::unique_ptr<rudp_protocol_packet> on_transport_send() override
+    std::unique_ptr<rudp_protocol_packet> on_transport_send()
     {
         uint32_t seq_no = 0;
         char payload_buf[ordered_channel_config::MAX_MSS];
@@ -754,15 +765,18 @@ public:
         bool send_ack = flags.get_send_ack() || rcv_window.is_ack_pending();
         bool send_window = flags.get_send_window();
 
-        if (payload_len == 0 && !send_ack && !send_window) {
+        if (payload_len == 0 && !send_ack && !send_window)
+        {
             logger::getInstance().logTest("on_transport_send: No data to send, no ACK/Window update needed. Returning nullptr.");
             return nullptr;
         }
 
-        uint32_t total_size = rudp_protocol::CHANNEL_HEADER_OFFSET +
+        uint32_t total_size = rudp_protocol_packet::CHANNEL_HEADER_OFFSET +
                               ordered_channel_config::HEADER_SIZE + payload_len;
         auto packet = std::make_unique<rudp_protocol_packet>(total_size);
-        char *pkt_buf = packet->get_buffer() + rudp_protocol::CHANNEL_HEADER_OFFSET;
+        packet->set_length(total_size);
+
+        char *pkt_buf = packet->get_buffer() + rudp_protocol_packet::CHANNEL_HEADER_OFFSET;
 
         channel_header header{};
         header.seq_no = seq_no;
@@ -785,15 +799,17 @@ public:
         uint16_t final_csum = htons(~csum_val);
         memcpy(pkt_buf + 12, &final_csum, 2);
 
-        packet->set_length(total_size);
         rcv_window.clear_ack_pending();
 
         std::string log_msg = "Sending packet: Seq=" + std::to_string(seq_no) +
                               ", Ack=" + std::to_string(header.ack_no) +
                               ", Win=" + std::to_string(header.win_sz);
-        if (payload_len > 0) log_msg += ", Payload=" + std::to_string(payload_len) + " bytes (Data)";
-        if (send_ack) log_msg += " (ACK)";
-        if (send_window) log_msg += " (WIND_SZ)";
+        if (payload_len > 0)
+            log_msg += ", Payload=" + std::to_string(payload_len) + " bytes (Data)";
+        if (send_ack)
+            log_msg += " (ACK)";
+        if (send_window)
+            log_msg += " (WIND_SZ)";
         logger::getInstance().logInfo(log_msg);
 
         return packet;
@@ -801,7 +817,10 @@ public:
 
     ssize_t read_bytes_to_application(char *buf, const uint32_t &len) override
     {
-        return rcv_window.read_data(buf, len);
+        auto ret = rcv_window.read_data(buf, len);
+        if (rcv_window.get_available_bytes_cnt() > 0 && on_app_data_ready)
+            on_app_data_ready();
+        return ret;
     }
 
     ssize_t write_bytes_from_application(const char *buf, const uint32_t &len) override
@@ -812,8 +831,13 @@ public:
             logger::getInstance().logInfo("Application wrote " + std::to_string(written) + " bytes. Attempting to send immediately.");
             auto pkt = on_transport_send();
             if (pkt && on_net_data_ready)
+            {
                 on_net_data_ready(std::move(pkt));
-        } else {
+                schedule_rto_timer();
+            }
+        }
+        else
+        {
             logger::getInstance().logWarning("Application write failed (buffer full).");
         }
         return written;
@@ -835,7 +859,5 @@ public:
     {
         global_timer_manager = timer_man;
         logger::getInstance().logInfo("Timer manager set. Scheduling initial timers.");
-        schedule_rto_timer();
-        schedule_keepalive_timer();
     }
 };

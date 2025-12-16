@@ -16,8 +16,6 @@ public:
     // recieve from client what came on udp
     virtual void on_transport_receive(std::unique_ptr<rudp_protocol_packet>) = 0;
 
-    virtual std::unique_ptr<rudp_protocol_packet> on_transport_send() = 0;
-
     // raed into application buffer what came from network
     virtual ssize_t read_bytes_to_application(char *buf, const uint32_t &len) = 0;
 
