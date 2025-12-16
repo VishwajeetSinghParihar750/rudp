@@ -187,6 +187,66 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
     uint8_t get_fin_flag() const { return static_cast<uint8_t>(CONTROL_PACKET_HEADER_FLAGS::FIN); }
     uint8_t get_syn_flag() const { return static_cast<uint8_t>(CONTROL_PACKET_HEADER_FLAGS::SYN); }
 
+    void last_ack_cb_with_retry(int retries_left = 5)
+    {
+        std::lock_guard<std::recursive_mutex> lg(g_connection_state_machine_mutex);
+
+        if (current_state.load() != CONNECTION_STATE::LAST_ACK || retries_left <= 0)
+            return;
+
+        logger::getInstance().logInfo("LAST_ACK retry " +
+                                      std::to_string(6 - retries_left) + "/5");
+
+        last_response = {get_fin_flag(), true};
+        send_response_to_network_without_piggybacking();
+
+        if (retries_left > 1)
+        {
+            std::weak_ptr<connection_state_machine> self_weak_ptr = shared_from_this();
+
+            global_timer_manager->add_timer(std::make_unique<timer_info>(
+                duration_ms(ROUND_TRIP_TIME * 2),
+                [self_weak_ptr, retries_left]()
+                {
+                    if (auto sp = self_weak_ptr.lock())
+                    {
+                        sp->last_ack_cb_with_retry(retries_left - 1);
+                    }
+                }));
+        }
+        else
+        {
+            logger::getInstance().logWarning("LAST_ACK retries exhausted");
+        }
+    }
+
+    void time_wait_cb_with_retry(int retries_left = 5)
+    {
+        std::lock_guard<std::recursive_mutex> lg(g_connection_state_machine_mutex);
+
+        duration_ms time_spent = std::chrono::duration_cast<duration_ms>(std::chrono::steady_clock::now() - last_ack_send_time);
+
+        if (retries_left > 0 && time_spent < duration_ms(connection_state_machine::ROUND_TRIP_TIME * 2))
+        {
+            std::weak_ptr<connection_state_machine> self_weak_ptr = shared_from_this();
+
+            global_timer_manager->add_timer(std::make_unique<timer_info>(
+                duration_ms(ROUND_TRIP_TIME * 2),
+                [self_weak_ptr, retries_left]()
+                {
+                    if (auto sp = self_weak_ptr.lock())
+                    {
+                        sp->time_wait_cb_with_retry(retries_left - 1);
+                    }
+                }));
+        }
+        else
+        {
+            current_state.store(CONNECTION_STATE::CLOSED);
+            logger::getInstance().logInfo("Transition: TIME_WAIT -> CLOSED (2*RTT elapsed).");
+        }
+    }
+
     fsm_result close()
     {
         std::lock_guard<std::recursive_mutex> lg(g_connection_state_machine_mutex);
@@ -197,28 +257,7 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
             current_state.store(CONNECTION_STATE::LAST_ACK);
             logger::getInstance().logInfo("Application requested close. Transitioning to LAST_ACK state. Sending FIN.");
 
-            last_response = {get_fin_flag(), true};
-            send_response_to_network_without_piggybacking();
-
-            std::weak_ptr<connection_state_machine> self_weak_ptr = shared_from_this();
-
-            std::function<void()> cb = [self_weak_ptr]() -> void
-            {
-                auto sp = self_weak_ptr.lock();
-                if (sp == nullptr)
-                {
-                    return;
-                }
-
-                std::lock_guard<std::recursive_mutex> lg(sp->g_connection_state_machine_mutex);
-                if (sp->current_state.load() == CONNECTION_STATE::LAST_ACK)
-                {
-                    sp->last_response = {sp->get_fin_flag(), true};
-                    sp->send_response_to_network_without_piggybacking();
-                }
-            };
-
-            add_timer_with_retries_exponential(global_timer_manager, duration_ms(ROUND_TRIP_TIME * 2), cb, 5);
+            last_ack_cb_with_retry();
 
             return {false, false};
         }
@@ -295,29 +334,7 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
                 send_response_to_network_without_piggybacking();
                 logger::getInstance().logInfo("Transition: ESTABLISHED -> TIME_WAIT (Received FIN, sending ACK).");
 
-                std::weak_ptr<connection_state_machine> this_weak_ptr = shared_from_this();
-
-                std::function<void()> cb = [this_weak_ptr]() -> void
-                {
-                    auto sp = this_weak_ptr.lock();
-                    if (sp == nullptr)
-                        return;
-
-                    std::lock_guard<std::recursive_mutex> lg(sp->g_connection_state_machine_mutex);
-                    duration_ms time_spent = std::chrono::duration_cast<duration_ms>(std::chrono::steady_clock::now() - sp->last_ack_send_time);
-                    if (time_spent < duration_ms(connection_state_machine::ROUND_TRIP_TIME * 2))
-                    {
-                        sp->last_response = {sp->get_ack_flag(), true};
-                        sp->send_response_to_network_without_piggybacking();
-                    }
-                    else
-                    {
-                        sp->current_state.store(CONNECTION_STATE::CLOSED);
-                        logger::getInstance().logInfo("Transition: TIME_WAIT -> CLOSED (2*RTT elapsed).");
-                    }
-                };
-
-                add_timer_with_retries_exponential(global_timer_manager, duration_ms(ROUND_TRIP_TIME * 2), cb, 5);
+                time_wait_cb_with_retry();
 
                 return {false, true};
             }
