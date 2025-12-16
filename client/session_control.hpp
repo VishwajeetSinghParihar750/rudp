@@ -6,7 +6,7 @@
 #include <mutex>
 #include <atomic>
 
-#include "common/rudp_protocol_packet.hpp"
+#include "../common/rudp_protocol_packet.hpp"
 #include "i_udp_for_session_control.hpp"
 #include "i_channel_manager_for_session_control.hpp"
 #include "i_session_control_for_udp.hpp"
@@ -14,7 +14,7 @@
 #include "transport_addr.hpp"
 #include "rudp_protocol.hpp"
 #include "timer_manager.hpp"
-#include "common/thread_safe_unordered_map.hpp"
+#include "../common/thread_safe_unordered_map.hpp"
 #include "types.hpp"
 
 class i_client;
