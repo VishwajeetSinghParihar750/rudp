@@ -8,8 +8,10 @@
 class logger
 {
     bool info_on = false;
-    bool error_on = true; // Error should typically be ON by default
+    bool error_on = false;
+    bool warning_on = false;
     bool test_on = false;
+    bool critical_on = false;
     std::mutex log_mutex;
 
     logger() = default;
@@ -29,29 +31,52 @@ public:
 
     void setInfoEnabled(bool enable) { info_on = enable; }
     void setErrorEnabled(bool enable) { error_on = enable; }
+    void setWarningEnabled(bool enable) { warning_on = enable; }
     void setTestEnabled(bool enable) { test_on = enable; }
+    void setCriticalEnabled(bool enable) { critical_on = enable; }
 
     void logInfo(const std::string &msg)
     {
-        if (info_on) {
+        if (info_on)
+        {
             std::lock_guard<std::mutex> lock(log_mutex);
-            std::cout << "[INFO] " << msg << '\n';
+            std::cout << "✨ [INFO] " << msg << '\n';
+        }
+    }
+
+    void logWarning(const std::string &msg)
+    {
+        if (warning_on)
+        {
+            std::lock_guard<std::mutex> lock(log_mutex);
+            std::cerr << "⚠️ [WARN] " << msg << '\n';
         }
     }
 
     void logError(const std::string &msg)
     {
-        if (error_on) {
+        if (error_on)
+        {
             std::lock_guard<std::mutex> lock(log_mutex);
-            std::cerr << "[ERROR] " << msg << '\n';
+            std::cerr << "❌ [ERROR] " << msg << '\n';
         }
     }
 
-    void testLog(const std::string &msg)
+    void logCritical(const std::string &msg)
     {
-        if (test_on) {
+        if (critical_on)
+        {
             std::lock_guard<std::mutex> lock(log_mutex);
-            std::cout << "[TEST] " << msg << '\n';
+            std::cerr << "🚨 [CRITICAL] " << msg << '\n';
+        }
+    }
+
+    void logTest(const std::string &msg)
+    {
+        if (test_on)
+        {
+            std::lock_guard<std::mutex> lock(log_mutex);
+            std::cout << "🧪 [TEST] " << msg << '\n';
         }
     }
 };

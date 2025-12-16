@@ -21,6 +21,7 @@ int main()
             std::cout << "got message on channel : " << ch_id << ", client id  : " << cl_id << " = ";
             std::cout.write(buf, nread);
             std::cout << std::endl;
+            server->write_to_channel(ch_id, cl_id, buf, len);
         }
     }
 }

@@ -12,6 +12,7 @@
 #include <string.h>
 #include <utility>
 #include <chrono>
+#include <sstream>
 
 #include "types.hpp"
 #include "../common/thread_safe_unordered_map.hpp"
@@ -25,6 +26,7 @@
 #include "../common/thread_safe_priority_queue.hpp"
 #include "i_session_control_for_channel_manager.hpp"
 #include "timer_manager.hpp"
+#include "../common/logger.hpp"
 
 enum class READ_FROM_CHANNEL_ERROR : ssize_t
 {
@@ -69,20 +71,20 @@ class channel_manager : public i_client, public i_channel_manager_for_session_co
     std::shared_ptr<i_session_control_for_channel_manager> session_control_;
 
     std::atomic<bool> server_closed = false;
-
     void serialize_channel_manager_header(rudp_protocol_packet &pkt, const rudp_protocol::channel_manager_header &c_header)
     {
-        const size_t off = rudp_protocol_packet::CHANNEL_MANAGER_HEADER_OFFEST;
-        const size_t sz = rudp_protocol_packet::CHANNEL_MANAGER_HEADER_SIZE;
+        const size_t off = rudp_protocol::CHANNEL_MANAGER_HEADER_OFFSET;
+        const size_t sz = rudp_protocol::CHANNEL_MANAGER_HEADER_SIZE;
 
-        assert(pkt.get_capacity() >= off + sz);
+        if (pkt.get_length() < off + sz)
+        {
+            logger::getInstance().logError("Serialize: Packet capacity too small for header.");
+        }
+        assert(pkt.get_length() >= off + sz);
 
         uint32_t nch_id = static_cast<uint32_t>(c_header.ch_id);
         uint32_t net = htonl(nch_id);
         memcpy(pkt.get_buffer() + off, &net, sizeof(net));
-
-        if (pkt.get_length() < off + sz)
-            pkt.set_length(off + sz);
     }
 
     rudp_protocol::channel_manager_header deserialize_channel_manager_header(rudp_protocol_packet &pkt)
@@ -90,6 +92,10 @@ class channel_manager : public i_client, public i_channel_manager_for_session_co
         const size_t off = rudp_protocol::CHANNEL_MANAGER_HEADER_OFFSET;
         const size_t sz = rudp_protocol::CHANNEL_MANAGER_HEADER_SIZE;
 
+        if (pkt.get_length() < off + sz)
+        {
+            logger::getInstance().logError("Deserialize: Packet length smaller than expected header size.");
+        }
         assert(pkt.get_length() >= off + sz);
 
         const char *buf = pkt.get_const_buffer();
@@ -102,7 +108,12 @@ class channel_manager : public i_client, public i_channel_manager_for_session_co
     std::shared_ptr<i_channel> create_new_active_channel(channel_id ch_id)
     {
         if (!channels.contains(ch_id))
+        {
+            std::ostringstream oss;
+            oss << "Attempted to create active channel for unknown channel ID: " << ch_id;
+            logger::getInstance().logWarning(oss.str());
             return nullptr;
+        }
 
         switch (channels[ch_id])
         {
@@ -122,6 +133,9 @@ class channel_manager : public i_client, public i_channel_manager_for_session_co
                         info.ch_id = ch_id;
                         info.time = std::chrono::steady_clock::now();
                         sp->ready_to_rcv_queue.push(std::move(info));
+                        std::ostringstream oss;
+                        oss << "Channel " << ch_id << " set to ready to receive.";
+                        logger::getInstance().logInfo(oss.str());
                     }
                 });
 
@@ -133,11 +147,19 @@ class channel_manager : public i_client, public i_channel_manager_for_session_co
                 });
 
             active_channels.insert(ch_id, ch);
+            std::ostringstream oss;
+            oss << "Created new active reliable ordered channel with ID: " << ch_id;
+            logger::getInstance().logInfo(oss.str());
             return ch;
         }
 
         default:
+        {
+            std::ostringstream oss;
+            oss << "Attempted to create channel with unhandled type for ID: " << ch_id;
+            logger::getInstance().logError(oss.str());
             return nullptr;
+        }
         }
     }
 
@@ -146,6 +168,9 @@ class channel_manager : public i_client, public i_channel_manager_for_session_co
 
         serialize_channel_manager_header(*pkt, ch_id);
         session_control_->on_transport_send_data(std::move(pkt));
+        std::ostringstream oss;
+        oss << "Forwarded packet from channel " << ch_id << " to session control for transport send.";
+        logger::getInstance().logInfo(oss.str());
     }
 
     friend auto create_server(const char *);
@@ -168,13 +193,27 @@ public:
     // for i_client
     void add_channel(channel_id ch_id, channel_type type) override
     {
-        //  ℹ️add error handling to resopns back with error if wrong
+        // ℹ️add error handling to resopns back with error if wrong
         if (channels.size() >= MAX_CHANNELS)
+        {
+            std::ostringstream oss;
+            oss << "Cannot add channel " << ch_id << ". Maximum channel limit (" << MAX_CHANNELS << ") reached.";
+            logger::getInstance().logWarning(oss.str());
             return;
+        }
 
         if (ch_id != INVALID_CHANNEL_ID && !channels.contains(ch_id))
         {
             channels.emplace(ch_id, type);
+            std::ostringstream oss;
+            oss << "Channel " << ch_id << " of type " << static_cast<int>(type) << " added to available channels.";
+            logger::getInstance().logInfo(oss.str());
+        }
+        else
+        {
+            std::ostringstream oss;
+            oss << "Failed to add channel " << ch_id << ". It is either INVALID_CHANNEL_ID or already exists.";
+            logger::getInstance().logWarning(oss.str());
         }
     }
 
@@ -182,6 +221,7 @@ public:
     {
         session_control_->on_close_client(); // now nothing should come to me from server, and if application tries to read or write after calling close, its undefined from my side
         // my things will get remvoed in destructor iteslf
+        logger::getInstance().logInfo("Client closing initiated by application.");
     }
 
     ssize_t read_from_channel_nonblocking(channel_id &channel_id_, char *buf, const size_t len) override
@@ -190,23 +230,40 @@ public:
         if (server_closed.load())
         {
             channel_id_ = INVALID_CHANNEL_ID;
+            logger::getInstance().logWarning("Attempted non-blocking read after server disconnected.");
             return (ssize_t)READ_FROM_CHANNEL_ERROR::SERVER_DISCONNECTED;
         }
 
         rcv_ready_queue_info info;
         bool result = ready_to_rcv_queue.pop(info);
         if (!result)
+        {
             return (ssize_t)READ_FROM_CHANNEL_ERROR::NO_PENDING_DATA;
+        }
 
         channel_id_ = info.ch_id;
 
         if (!active_channels.contains(channel_id_))
+        {
+            std::ostringstream oss;
+            oss << "Channel " << channel_id_ << " was in ready queue but not in active channels. Trying next.";
+            logger::getInstance().logWarning(oss.str());
             return read_from_channel_nonblocking(channel_id_, buf, len);
+        }
 
         auto cur_channel_opt = active_channels.get(channel_id_);
         if (cur_channel_opt)
-            return cur_channel_opt.value()->read_bytes_to_application(buf, len);
+        {
+            ssize_t bytes_read = cur_channel_opt.value()->read_bytes_to_application(buf, len);
+            std::ostringstream oss;
+            oss << "Non-blocking read on channel " << channel_id_ << " returned " << bytes_read << " bytes.";
+            logger::getInstance().logInfo(oss.str());
+            return bytes_read;
+        }
 
+        std::ostringstream oss;
+        oss << "Channel " << channel_id_ << " was in ready queue but got removed from active channels before read. Trying next.";
+        logger::getInstance().logWarning(oss.str());
         return read_from_channel_nonblocking(channel_id_, buf, len);
     }
 
@@ -219,6 +276,7 @@ public:
             if (server_closed.load())
             {
                 channel_id_ = INVALID_CHANNEL_ID;
+                logger::getInstance().logWarning("Attempted blocking read after server disconnected.");
                 return (ssize_t)READ_FROM_CHANNEL_ERROR::SERVER_DISCONNECTED;
             }
 
@@ -232,31 +290,67 @@ public:
                 if (ch_opt)
                 {
                     auto cur_channel = ch_opt.value();
-                    return cur_channel->read_bytes_to_application(buf, len);
+                    ssize_t bytes_read = cur_channel->read_bytes_to_application(buf, len);
+                    std::ostringstream oss;
+                    oss << "Blocking read on channel " << channel_id_ << " returned " << bytes_read << " bytes.";
+                    logger::getInstance().logInfo(oss.str());
+                    return bytes_read;
+                }
+                else
+                {
+                    std::ostringstream oss;
+                    oss << "Blocking read: Channel " << channel_id_ << " found in ready queue but not in active channels. Resuming wait.";
+                    logger::getInstance().logWarning(oss.str());
                 }
             }
+            // If result is false (timeout), loop continues and checks server_closed again.
         }
     }
     ssize_t write_to_channel(const channel_id &channel_id_, const char *buf, const size_t len) override
     {
+        if (server_closed.load())
+        {
+            std::ostringstream oss;
+            oss << "Attempted write on channel " << channel_id_ << " after server disconnected.";
+            logger::getInstance().logWarning(oss.str());
+            return -1;
+        }
+
         auto ch_opt = active_channels.get(channel_id_);
         if (!ch_opt)
         {
             if (channels.contains(channel_id_))
             {
+                std::ostringstream oss;
+                oss << "Channel " << channel_id_ << " is known but not active. Attempting to create new active channel.";
+                logger::getInstance().logInfo(oss.str());
                 if (create_new_active_channel(channel_id_) != nullptr)
                 {
                     return write_to_channel(channel_id_, buf, len);
                 }
                 else
+                {
+                    std::ostringstream oss_err;
+                    oss_err << "Failed to create new active channel for ID: " << channel_id_;
+                    logger::getInstance().logError(oss_err.str());
                     return -1;
+                }
             }
             else
+            {
+                std::ostringstream oss;
+                oss << "Attempted write on unknown channel ID: " << channel_id_;
+                logger::getInstance().logError(oss.str());
                 return -1;
+            }
         }
 
         auto cur_channel = ch_opt.value();
-        return cur_channel->write_bytes_from_application(buf, len);
+        ssize_t bytes_written = cur_channel->write_bytes_from_application(buf, len);
+        std::ostringstream oss;
+        oss << "Write on active channel " << channel_id_ << " returned " << bytes_written << " bytes.";
+        logger::getInstance().logInfo(oss.str());
+        return bytes_written;
     }
 
     // for i session control
@@ -264,16 +358,48 @@ public:
     void on_server_disconnected() override
     {
         server_closed.store(true);
+        logger::getInstance().logCritical("Server disconnected. Setting server_closed flag and notifying waiting threads.");
     }
     void on_transport_receive(std::unique_ptr<rudp_protocol_packet> pkt) override
     {
+        if (pkt->get_length() < rudp_protocol_packet::CHANNEL_MANAGER_HEADER_OFFEST + rudp_protocol_packet::CHANNEL_MANAGER_HEADER_SIZE)
+        {
+            logger::getInstance().logError(" packet too small for channel manager ");
+            return;
+        }
+
         rudp_protocol::channel_manager_header cm_header = deserialize_channel_manager_header(*pkt);
-        auto ch_opt = active_channels.get(cm_header.ch_id);
+        channel_id ch_id = cm_header.ch_id;
+
+        auto ch_opt = active_channels.get(ch_id);
 
         if (ch_opt)
+        {
+            std::ostringstream oss;
+            oss << "Received transport data for active channel " << ch_id << ".";
+            logger::getInstance().logInfo(oss.str());
             ch_opt.value()->on_transport_receive(std::move(pkt));
-        else if (channels.contains(cm_header.ch_id) && create_new_active_channel(cm_header.ch_id) != nullptr)
-            on_transport_receive(std::move(pkt));
+        }
+        else if (channels.contains(ch_id))
+        {
+            std::ostringstream oss;
+            oss << "Received transport data for known, inactive channel " << ch_id << ". Attempting to activate and process.";
+            logger::getInstance().logInfo(oss.str());
+            if (create_new_active_channel(ch_id) != nullptr)
+                on_transport_receive(std::move(pkt)); // Recursive call to process on the newly active channel
+            else
+            {
+                std::ostringstream oss_err;
+                oss_err << "Failed to activate channel " << ch_id << " on first receive. Dropping packet.";
+                logger::getInstance().logError(oss_err.str());
+            }
+        }
+        else
+        {
+            std::ostringstream oss;
+            oss << "Received transport data for unknown channel " << ch_id << ". Dropping packet.";
+            logger::getInstance().logWarning(oss.str());
+        }
     }
 
     void set_timer_manager(std::shared_ptr<timer_manager> timer_man, client_setup_access_key) { global_timers_manager = timer_man; }

@@ -1,8 +1,11 @@
 #pragma once
 
 #include <netinet/in.h>
+#include <arpa/inet.h>
 #include <cstring>
 #include <functional>
+#include <string>
+#include <sstream>
 
 struct transport_addr
 {
@@ -54,6 +57,31 @@ struct transport_addr
                    std::memcmp(&a->sin6_addr, &b->sin6_addr, sizeof(in6_addr)) == 0;
         }
         return false;
+    }
+
+    std::string to_string() const
+    {
+        char ipstr[INET6_ADDRSTRLEN];
+        int port = 0;
+        std::string ip_address;
+
+        if (addr.ss_family == AF_INET)
+        {
+            const sockaddr_in *s = reinterpret_cast<const sockaddr_in *>(&addr);
+            inet_ntop(AF_INET, &s->sin_addr, ipstr, sizeof(ipstr));
+            port = ntohs(s->sin_port);
+            ip_address = ipstr;
+            return ip_address + ":" + std::to_string(port) + " (IPv4)";
+        }
+        else if (addr.ss_family == AF_INET6)
+        {
+            const sockaddr_in6 *s = reinterpret_cast<const sockaddr_in6 *>(&addr);
+            inet_ntop(AF_INET6, &s->sin6_addr, ipstr, sizeof(ipstr));
+            port = ntohs(s->sin6_port);
+            ip_address = ipstr;
+            return "[" + ip_address + "]:" + std::to_string(port) + " (IPv6)";
+        }
+        return "Unknown Address Family (" + std::to_string(addr.ss_family) + ")";
     }
 };
 
