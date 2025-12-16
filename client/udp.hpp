@@ -30,6 +30,8 @@ class udp : public i_udp_for_session_control
     int socket_fd = -1;
     int epoll_fd = -1;
 
+    std::atomic<bool> server_closed = false;
+
     std::jthread io_thread;
 
     void set_non_blocking(int fd)
@@ -140,7 +142,7 @@ class udp : public i_udp_for_session_control
 
         int event_cnt = 0;
         logger::getInstance().logInfo("UDP I/O thread started.");
-        while (!token.stop_requested())
+        while (!token.stop_requested() && !server_closed.load())
         {
             event_cnt = epoll_wait(epoll_fd, events, MAX_EVENTS, 100);
 
@@ -178,8 +180,13 @@ class udp : public i_udp_for_session_control
 
                     if (bytes_avail == 0)
                     {
+
                         logger::getInstance().logWarning("EPOLLIN triggered but FIONREAD returned 0 bytes.");
-                        continue;
+                        server_closed.store(true);
+                        auto sp = session_control_.lock();
+                        if (sp)
+                            sp->on_server_disconnected();
+                        break;
                     }
 
                     std::unique_ptr<rudp_protocol_packet> pkt = std::make_unique<rudp_protocol_packet>(bytes_avail);
@@ -273,6 +280,12 @@ public:
         {
             if (errno != EWOULDBLOCK && errno != EAGAIN)
             {
+                auto sp = session_control_.lock();
+
+                server_closed.store(true);
+                if (sp)
+                    sp->on_server_disconnected();
+
                 std::ostringstream oss;
                 oss << "send failed: " << strerror(errno);
                 logger::getInstance().logError(oss.str());

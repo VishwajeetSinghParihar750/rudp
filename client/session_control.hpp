@@ -247,6 +247,12 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
         }
     }
 
+    void on_server_disconnected()
+    {
+        std::lock_guard<std::recursive_mutex> lg(g_connection_state_machine_mutex);
+        current_state.store(CONNECTION_STATE::CLOSED);
+    }
+
     fsm_result close()
     {
         std::lock_guard<std::recursive_mutex> lg(g_connection_state_machine_mutex);
@@ -451,6 +457,7 @@ class session_control : public i_session_control_for_udp, public i_session_contr
             if (auto sp = channel_manager_ptr.lock())
             {
                 sp->on_server_disconnected();
+                trigger_teardown_step();
                 logger::getInstance().logCritical("FSM indicated stop data exchange. Notifying channel manager of server disconnect.");
             }
         }
@@ -531,12 +538,6 @@ public:
         } // this shared ptr will keep session control alive until all fsms gracefully close
     }
 
-    void on_notifying_server_close_to_application() override
-    {
-        logger::getInstance().logWarning("Notifying server close to application.");
-        trigger_teardown_step();
-    }
-
     void on_transport_receive(std::unique_ptr<rudp_protocol_packet> pkt) override
     {
         if (!client_fsm)
@@ -567,6 +568,13 @@ public:
         {
             logger::getInstance().logWarning("Data exchange not allowed by FSM. Dropping received data packet.");
         }
+    }
+    void on_server_disconnected() override
+    {
+        auto sp = channel_manager_ptr.lock();
+        if (sp)
+            sp->on_server_disconnected();
+        client_fsm->on_server_disconnected();
     }
 
     void on_transport_send_data(std::unique_ptr<rudp_protocol_packet> pkt) override

@@ -12,4 +12,5 @@ public:
     virtual ~i_session_control_for_udp() = default;
 
     virtual void on_transport_receive(std::unique_ptr<rudp_protocol_packet> pkt) = 0;
+    virtual void on_server_disconnected() = 0;
 };

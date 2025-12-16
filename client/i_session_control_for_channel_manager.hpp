@@ -11,6 +11,5 @@ public:
     ~i_session_control_for_channel_manager() = default;
 
     virtual void on_transport_send_data(std::unique_ptr<rudp_protocol_packet> pkt) = 0;
-    virtual void on_notifying_server_close_to_application() = 0;
     virtual void on_close_client() = 0;
 };
