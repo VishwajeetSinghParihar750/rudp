@@ -17,11 +17,13 @@
 #include "../common/types.hpp"
 #include "../common/thread_safe_unordered_map.hpp"
 #include "../common/i_channel.hpp"
-#include "../common/channels/reliable_ordered_channel/reliable_ordered_channel.hpp"
 #include "../common/thread_safe_priority_queue.hpp"
 #include "../common/timer_manager.hpp"
 #include "../common/logger.hpp"
 #include "../common/rudp_protocol_packet.hpp"
+#include "../common/channels/reliable_ordered_channel/reliable_ordered_channel.hpp"
+#include "../common/channels/unordered_unreliable_channel/unordered_unreliable_channel.hpp"
+#include "../common/channels/ordered_unreliable_channel/ordered_unreliable_channel.hpp"
 
 #include "i_client.hpp"
 #include "i_channel_manager_for_session_control.hpp"
@@ -125,7 +127,78 @@ class channel_manager : public i_client, public i_channel_manager_for_session_co
         {
         case channel_type::RELIABLE_ORDERED_CHANNEL:
         {
-            auto ch = std::make_shared<reliable_ordered_channel>(ch_id);
+            auto ch = std::make_shared<reliable_ordered_channel::reliable_ordered_channel>(ch_id);
+
+            ch->set_timer_manager(global_timers_manager);
+
+            std::weak_ptr<channel_manager> this_weak_ptr = shared_from_this();
+            ch->set_on_app_data_ready(
+                [this_weak_ptr, ch_id]()
+                {
+                    if (auto sp = this_weak_ptr.lock())
+                    {
+                        rcv_ready_queue_info info;
+                        info.ch_id = ch_id;
+                        info.time = std::chrono::steady_clock::now();
+                        sp->ready_to_rcv_queue.push(std::move(info));
+                        std::ostringstream oss;
+                        oss << "Channel " << ch_id << " set to ready to receive.";
+                        logger::getInstance().logInfo(oss.str());
+                    }
+                });
+
+            ch->set_on_net_data_ready(
+                [this_weak_ptr, ch_id](std::unique_ptr<rudp_protocol_packet> pkt)
+                {
+                    if (auto sp = this_weak_ptr.lock())
+                        sp->on_transport_send(ch_id, std::move(pkt));
+                });
+
+            active_channels.insert(ch_id, ch);
+            std::ostringstream oss;
+            oss << "Created new active reliable ordered channel with ID: " << ch_id;
+            logger::getInstance().logInfo(oss.str());
+            return ch;
+        }
+
+        case channel_type::UNORDERED_UNRELIABLE_CHANNEL:
+        {
+            auto ch = std::make_shared<unordered_unreliable_channel::unordered_unreliable_channel>(ch_id);
+
+            ch->set_timer_manager(global_timers_manager);
+
+            std::weak_ptr<channel_manager> this_weak_ptr = shared_from_this();
+            ch->set_on_app_data_ready(
+                [this_weak_ptr, ch_id]()
+                {
+                    if (auto sp = this_weak_ptr.lock())
+                    {
+                        rcv_ready_queue_info info;
+                        info.ch_id = ch_id;
+                        info.time = std::chrono::steady_clock::now();
+                        sp->ready_to_rcv_queue.push(std::move(info));
+                        std::ostringstream oss;
+                        oss << "Channel " << ch_id << " set to ready to receive.";
+                        logger::getInstance().logInfo(oss.str());
+                    }
+                });
+
+            ch->set_on_net_data_ready(
+                [this_weak_ptr, ch_id](std::unique_ptr<rudp_protocol_packet> pkt)
+                {
+                    if (auto sp = this_weak_ptr.lock())
+                        sp->on_transport_send(ch_id, std::move(pkt));
+                });
+
+            active_channels.insert(ch_id, ch);
+            std::ostringstream oss;
+            oss << "Created new active reliable ordered channel with ID: " << ch_id;
+            logger::getInstance().logInfo(oss.str());
+            return ch;
+        }
+        case channel_type::ORDERED_UNRELIABLE_CHANNEL:
+        {
+            auto ch = std::make_shared<ordered_unreliable_channel::ordered_unreliable_channel>(ch_id);
 
             ch->set_timer_manager(global_timers_manager);
 

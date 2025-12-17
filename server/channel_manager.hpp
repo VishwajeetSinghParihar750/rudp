@@ -18,6 +18,8 @@
 #include "../common/thread_safe_unordered_set.hpp"
 #include "../common/i_channel.hpp"
 #include "../common/channels/reliable_ordered_channel/reliable_ordered_channel.hpp"
+#include "../common/channels/ordered_unreliable_channel/ordered_unreliable_channel.hpp"
+#include "../common/channels/unordered_unreliable_channel/unordered_unreliable_channel.hpp"
 #include "../common/thread_safe_priority_queue.hpp"
 #include "../common/timer_manager.hpp"
 #include "../common/logger.hpp"
@@ -125,7 +127,73 @@ class channel_manager : public i_server, public i_channel_manager_for_session_co
         {
         case channel_type::RELIABLE_ORDERED_CHANNEL:
         {
-            auto ch = std::make_shared<reliable_ordered_channel>(ch_id);
+            auto ch = std::make_shared<reliable_ordered_channel::reliable_ordered_channel>(ch_id);
+
+            ch->set_timer_manager(global_timers_manager);
+
+            std::weak_ptr<channel_manager> this_weak_ptr = shared_from_this();
+            ch->set_on_app_data_ready(
+                [this_weak_ptr, cl_id, ch_id]()
+                {
+                    if (auto sp = this_weak_ptr.lock())
+                    {
+                        rcv_ready_queue_info info;
+                        info.ch_id = ch_id;
+                        info.cl_id = cl_id;
+                        info.time = std::chrono::steady_clock::now();
+                        sp->ready_to_rcv_queue.push(std::move(info));
+                        logger::getInstance().logTest("RCV Ready: Data from ch " + std::to_string(ch_id) + " pushed to application queue.");
+                    }
+                });
+
+            ch->set_on_net_data_ready(
+                [this_weak_ptr, cl_id, ch_id](std::unique_ptr<rudp_protocol_packet> pkt)
+                {
+                    if (auto sp = this_weak_ptr.lock())
+                        sp->on_transport_send(cl_id, ch_id, std::move(pkt));
+                });
+
+            auto opt = per_client_channels.get(cl_id);
+            if (opt)
+                opt.value()->insert(ch_id, ch);
+            return ch;
+        }
+        case channel_type::UNORDERED_UNRELIABLE_CHANNEL:
+        {
+            auto ch = std::make_shared<unordered_unreliable_channel::unordered_unreliable_channel>(ch_id);
+
+            ch->set_timer_manager(global_timers_manager);
+
+            std::weak_ptr<channel_manager> this_weak_ptr = shared_from_this();
+            ch->set_on_app_data_ready(
+                [this_weak_ptr, cl_id, ch_id]()
+                {
+                    if (auto sp = this_weak_ptr.lock())
+                    {
+                        rcv_ready_queue_info info;
+                        info.ch_id = ch_id;
+                        info.cl_id = cl_id;
+                        info.time = std::chrono::steady_clock::now();
+                        sp->ready_to_rcv_queue.push(std::move(info));
+                        logger::getInstance().logTest("RCV Ready: Data from ch " + std::to_string(ch_id) + " pushed to application queue.");
+                    }
+                });
+
+            ch->set_on_net_data_ready(
+                [this_weak_ptr, cl_id, ch_id](std::unique_ptr<rudp_protocol_packet> pkt)
+                {
+                    if (auto sp = this_weak_ptr.lock())
+                        sp->on_transport_send(cl_id, ch_id, std::move(pkt));
+                });
+
+            auto opt = per_client_channels.get(cl_id);
+            if (opt)
+                opt.value()->insert(ch_id, ch);
+            return ch;
+        }
+        case channel_type::ORDERED_UNRELIABLE_CHANNEL:
+        {
+            auto ch = std::make_shared<ordered_unreliable_channel::ordered_unreliable_channel>(ch_id);
 
             ch->set_timer_manager(global_timers_manager);
 

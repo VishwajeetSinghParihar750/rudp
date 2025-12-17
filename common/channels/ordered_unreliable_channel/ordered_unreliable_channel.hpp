@@ -21,17 +21,24 @@
 #include <string>
 
 class timer_manager;
-namespace unordered_unreliable_channel
+
+namespace ordered_unreliable_channel
 {
     namespace channel_config
     {
-        constexpr uint16_t HEADER_SIZE = 0;
+        constexpr uint16_t HEADER_SIZE = 5;
         constexpr uint32_t DEFAULT_BUFFER_SIZE = 64 * 1024;
         constexpr uint16_t MAX_MSS = 65000;
     }
 
+    enum class channel_header_flags : uint8_t
+    {
+        CYCLE = 1,
+    };
     struct channel_header
     {
+        uint32_t seq_no;
+        uint8_t flags;
     };
 
     class packet_codec
@@ -39,11 +46,21 @@ namespace unordered_unreliable_channel
     public:
         static bool deserialize_header(const char *buf, uint32_t total_size, channel_header &out_header)
         {
+            if (total_size < sizeof(channel_header))
+                return false;
+
+            out_header.seq_no = *reinterpret_cast<const uint32_t *>(buf);
+            out_header.seq_no = ntohl(out_header.seq_no);
+            out_header.flags = *reinterpret_cast<const uint8_t *>(buf + sizeof(channel_header::seq_no));
+
             return true;
         }
 
         static void serialize_header(char *buf, const channel_header &header)
         {
+            uint32_t seq_no = htonl(header.seq_no);
+            memcpy(buf, &seq_no, sizeof(seq_no));
+            memcpy(buf + sizeof(channel_header::seq_no), &header.flags, sizeof(header.flags));
         }
     };
 
@@ -111,6 +128,8 @@ namespace unordered_unreliable_channel
     {
     private:
         channel_buffer buffer;
+        uint32_t seq_no = 0;
+        bool cycle = false;
         std::mutex lock;
 
     public:
@@ -146,10 +165,21 @@ namespace unordered_unreliable_channel
             return buffer.get_bytes_avail();
         }
 
-        auto get_rudp_protocol_pkt()
+        std::unique_ptr<rudp_protocol_packet> get_rudp_protocol_pkt(uint32_t &seq_no_, bool &cycle_)
         {
             std::lock_guard<std::mutex> guard(lock);
-            return buffer.get_rudp_protocol_packet();
+            seq_no_ = seq_no;
+            cycle_ = cycle;
+            auto toret = buffer.get_rudp_protocol_packet();
+            if (toret == nullptr)
+                return nullptr;
+
+            uint32_t advance = toret->get_length() - rudp_protocol_packet::CHANNEL_HEADER_OFFSET;
+            if (UINT32_MAX - seq_no < advance)
+                cycle = !cycle;
+            seq_no += advance;
+
+            return toret;
         }
     };
 
@@ -157,6 +187,8 @@ namespace unordered_unreliable_channel
     {
     private:
         channel_buffer buffer;
+        bool last_cycle = false;
+        uint32_t next_expected_seqno = 0;
         std::mutex lock;
 
     public:
@@ -177,9 +209,16 @@ namespace unordered_unreliable_channel
                 return false;
             }
 
-            std::lock_guard<std::mutex> guard(lock);
-
-            return buffer.put_rudp_protocol_packet(std::move(pkt));
+            bool new_cycle = ((out_header.flags & uint8_t(channel_header_flags::CYCLE)) & 1);
+            if (out_header.seq_no >= next_expected_seqno || new_cycle != last_cycle)
+            {
+                if (buffer.put_rudp_protocol_packet(std::move(pkt)))
+                {
+                    last_cycle = new_cycle;
+                    return true;
+                }
+            }
+            return false;
         }
 
         uint32_t get_available_bytes_cnt()
@@ -196,7 +235,7 @@ namespace unordered_unreliable_channel
         }
     };
 
-    class unordered_unreliable_channel : public i_channel, public std::enable_shared_from_this<unordered_unreliable_channel>
+    class ordered_unreliable_channel : public i_channel, public std::enable_shared_from_this<ordered_unreliable_channel>
     {
     private:
         channel_id ch_id;
@@ -208,18 +247,25 @@ namespace unordered_unreliable_channel
         std::unique_ptr<rudp_protocol_packet> on_transport_send()
         {
             // would add headers if had any, but none
-            auto pkt = snd_window.get_rudp_protocol_pkt();
+            channel_header header{};
+            bool cycle;
+
+            auto pkt = snd_window.get_rudp_protocol_pkt(header.seq_no, cycle);
+
             if (pkt == nullptr)
                 return nullptr;
 
+            if (cycle)
+                header.flags |= (uint8_t)(channel_header_flags::CYCLE);
+
             char *pkt_buf = pkt->get_buffer() + rudp_protocol_packet::CHANNEL_HEADER_OFFSET;
-            channel_header h;
-            packet_codec::serialize_header(pkt_buf, h);
+            packet_codec::serialize_header(pkt_buf, header);
+
             return pkt;
         }
 
     public:
-        explicit unordered_unreliable_channel(channel_id id) : ch_id(id)
+        explicit ordered_unreliable_channel(channel_id id) : ch_id(id)
         {
             logger::getInstance().logInfo("Unreliable Unordered Channel " + std::to_string(ch_id) + " created.");
         }
@@ -278,7 +324,7 @@ namespace unordered_unreliable_channel
                     on_net_data_ready(std::move(pkt));
                 return len;
             }
-            // only doing full packet sends no partial sending,since unreliable unordered
+            // only doing full packet sends no partial sending,since unreliable
             logger::getInstance().logWarning("Application write failed (buffer full).");
             return 0;
         }
