@@ -27,7 +27,7 @@ namespace ordered_unreliable_channel
     namespace channel_config
     {
         constexpr uint16_t HEADER_SIZE = 5;
-        constexpr uint32_t DEFAULT_BUFFER_SIZE = 64 * 1024;
+        constexpr uint32_t DEFAULT_BUFFER_SIZE = 32 * 1024 * 1024;
         constexpr uint16_t MAX_MSS = 65000;
     }
 
@@ -68,18 +68,26 @@ namespace ordered_unreliable_channel
     {
         std::queue<std::unique_ptr<rudp_protocol_packet>> data;
         uint32_t size;
-
         uint32_t bytes_avail = 0;
-        uint32_t free_space;
+        mutable std::mutex buffer_mutex;
 
     public:
         channel_buffer(uint32_t max_bytes) : size(max_bytes) {}
 
-        uint32_t get_free_space() const { return size - get_bytes_avail(); }
-        uint32_t get_bytes_avail() const { return bytes_avail; }
+        uint32_t get_free_space() const
+        {
+            std::lock_guard<std::mutex> guard(buffer_mutex);
+            return size - bytes_avail;
+        }
+        uint32_t get_bytes_avail() const
+        {
+            std::lock_guard<std::mutex> guard(buffer_mutex);
+            return bytes_avail;
+        }
 
         ssize_t read_data(char *obuf, const uint32_t &sz)
         {
+            std::lock_guard<std::mutex> guard(buffer_mutex);
             if (data.empty())
                 return 0;
 
@@ -98,11 +106,12 @@ namespace ordered_unreliable_channel
 
         bool put_rudp_protocol_packet(std::unique_ptr<rudp_protocol_packet> pkt)
         {
+            std::lock_guard<std::mutex> guard(buffer_mutex);
             if (pkt == nullptr)
                 return false;
 
             uint32_t packet_size = pkt->get_length() - (rudp_protocol_packet::CHANNEL_HEADER_OFFSET)-channel_config::HEADER_SIZE;
-            if (packet_size > get_bytes_avail() || packet_size == 0)
+            if (packet_size == 0 || (bytes_avail + packet_size > size))
                 return false;
 
             data.push(std::move(pkt));
@@ -111,14 +120,15 @@ namespace ordered_unreliable_channel
         }
         std::unique_ptr<rudp_protocol_packet> get_rudp_protocol_packet()
         {
+            std::lock_guard<std::mutex> guard(buffer_mutex);
             if (data.empty())
                 return nullptr;
             auto ret = std::move(data.front());
             data.pop();
 
             uint32_t packet_size = ret->get_length() - (rudp_protocol_packet::CHANNEL_HEADER_OFFSET)-channel_config::HEADER_SIZE;
-
-            bytes_avail -= packet_size;
+            if (bytes_avail >= packet_size)
+                bytes_avail -= packet_size;
 
             return ret;
         }
@@ -130,7 +140,7 @@ namespace ordered_unreliable_channel
         channel_buffer buffer;
         uint32_t seq_no = 0;
         bool cycle = false;
-        std::mutex lock;
+        mutable std::mutex lock;
 
     public:
         explicit send_window(uint32_t size = channel_config::DEFAULT_BUFFER_SIZE)
@@ -143,19 +153,17 @@ namespace ordered_unreliable_channel
 
             size_t off = (rudp_protocol_packet::CHANNEL_HEADER_OFFSET) + channel_config::HEADER_SIZE;
             uint32_t len = off + sz;
-            std::unique_ptr<rudp_protocol_packet> pkt = std::make_unique<rudp_protocol_packet>(sz);
-
+            std::unique_ptr<rudp_protocol_packet> pkt = std::make_unique<rudp_protocol_packet>(len);
+            pkt->set_length(len);
             memcpy(pkt->get_buffer() + off, ibuf, sz);
 
             return receive_packet(std::move(pkt));
         }
         bool receive_packet(std::unique_ptr<rudp_protocol_packet> pkt)
         {
+            std::lock_guard<std::mutex> guard(lock);
             if (pkt == nullptr)
                 return false;
-
-            std::lock_guard<std::mutex> guard(lock);
-
             return buffer.put_rudp_protocol_packet(std::move(pkt));
         }
 
@@ -189,7 +197,7 @@ namespace ordered_unreliable_channel
         channel_buffer buffer;
         bool last_cycle = false;
         uint32_t next_expected_seqno = 0;
-        std::mutex lock;
+        mutable std::mutex lock;
 
     public:
         explicit receive_window(uint32_t size = channel_config::DEFAULT_BUFFER_SIZE)
@@ -197,6 +205,7 @@ namespace ordered_unreliable_channel
 
         bool receive_packet(std::unique_ptr<rudp_protocol_packet> pkt, channel_header &out_header)
         {
+            std::lock_guard<std::mutex> guard(lock);
             if (pkt == nullptr)
                 return false;
 
@@ -205,7 +214,7 @@ namespace ordered_unreliable_channel
 
             if (!packet_codec::deserialize_header(packet, packet_size, out_header))
             {
-                logger::getInstance().logWarning("Packet failed header deserialization (checksum fail or malformed).");
+                logger::getInstance().logWarning("[receive_window::receive_packet] Packet failed header deserialization (checksum fail or malformed).");
                 return false;
             }
 
@@ -230,7 +239,6 @@ namespace ordered_unreliable_channel
         ssize_t read_data(char *out_buf, uint32_t len)
         {
             std::lock_guard<std::mutex> guard(lock);
-
             return buffer.read_data(out_buf, len);
         }
     };
@@ -267,12 +275,12 @@ namespace ordered_unreliable_channel
     public:
         explicit ordered_unreliable_channel(channel_id id) : ch_id(id)
         {
-            logger::getInstance().logInfo("Unreliable Unordered Channel " + std::to_string(ch_id) + " created.");
+            logger::getInstance().logInfo(std::string("[ordered_unreliable_channel::ordered_unreliable_channel] Unreliable Unordered Channel ") + std::to_string(ch_id) + " created.");
         }
 
         std::unique_ptr<i_channel> clone() const override
         {
-            logger::getInstance().logError("Cloning not supported rn ");
+            logger::getInstance().logError("[ordered_unreliable_channel::clone] Cloning not supported rn ");
             return nullptr;
         }
 
@@ -294,13 +302,13 @@ namespace ordered_unreliable_channel
             channel_header header{};
             if (!rcv_window.receive_packet(std::move(pkt), header))
             {
-                logger::getInstance().logWarning("Failed to process received packet in receive window. Dropped.");
+                logger::getInstance().logWarning("[ordered_unreliable_channel::on_transport_receive] Failed to process received packet in receive window. Dropped.");
                 return;
             }
 
             if (rcv_window.get_available_bytes_cnt() > 0)
             {
-                logger::getInstance().logInfo("Received data payload . Notifying application.");
+                logger::getInstance().logInfo("[ordered_unreliable_channel::on_transport_receive] Received data payload. Notifying application.");
                 if (on_app_data_ready)
                     on_app_data_ready();
             }
@@ -318,32 +326,32 @@ namespace ordered_unreliable_channel
         {
             if (snd_window.receive_bytes(buf, len))
             {
-                logger::getInstance().logInfo("Application wrote " + std::to_string(len) + " bytes. Attempting to send immediately.");
+                logger::getInstance().logInfo(std::string("[ordered_unreliable_channel::write_bytes_from_application] Application wrote ") + std::to_string(len) + " bytes. Attempting to send immediately.");
                 auto pkt = on_transport_send();
                 if (pkt && on_net_data_ready)
                     on_net_data_ready(std::move(pkt));
                 return len;
             }
             // only doing full packet sends no partial sending,since unreliable
-            logger::getInstance().logWarning("Application write failed (buffer full).");
+            logger::getInstance().logWarning("[ordered_unreliable_channel::write_bytes_from_application] Application write failed (buffer full).");
             return 0;
         }
 
         void set_on_app_data_ready(std::function<void()> f) override
         {
             on_app_data_ready = f;
-            logger::getInstance().logTest("on_app_data_ready callback set.");
+            logger::getInstance().logTest("[ordered_unreliable_channel::set_on_app_data_ready] on_app_data_ready callback set.");
         }
 
         void set_on_net_data_ready(std::function<void(std::unique_ptr<rudp_protocol_packet>)> f) override
         {
             on_net_data_ready = f;
-            logger::getInstance().logTest("on_net_data_ready callback set.");
+            logger::getInstance().logTest("[ordered_unreliable_channel::set_on_net_data_ready] on_net_data_ready callback set.");
         }
 
         void set_timer_manager(std::shared_ptr<timer_manager> timer_man) override
         {
-            logger::getInstance().logInfo("Timer manager not needed for unordered unreliable channel. ");
+            logger::getInstance().logInfo("[ordered_unreliable_channel::set_timer_manager] Timer manager not needed for unordered unreliable channel.");
         }
     };
 }

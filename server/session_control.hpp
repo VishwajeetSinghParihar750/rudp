@@ -94,7 +94,7 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
     connection_state_machine(std::function<void(uint8_t)> f, std::shared_ptr<timer_manager> timer_man)
         : current_state(CONNECTION_STATE::LISTEN), on_send_control_packet_to_transport(f), global_timer_manager(timer_man)
     {
-        logger::getInstance().logInfo("FSM created, state: LISTEN");
+        logger::getInstance().logInfo("[connection_state_machine::connection_state_machine] FSM created, state: LISTEN");
     }
     ~connection_state_machine()
     {
@@ -106,7 +106,7 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
         //     send_response_to_network_without_piggybacking();
         //     current_state.store(CONNECTION_STATE::CLOSED);
         // }
-        logger::getInstance().logInfo("FSM destroyed.");
+        logger::getInstance().logInfo("[connection_state_machine::~connection_state_machine] FSM destroyed.");
     }
 
     struct fsm_result
@@ -144,7 +144,7 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
         if ((toret.response_flags & (get_ack_flag())) && toret.to_send)
         {
             set_last_ack_sent_time();
-            logger::getInstance().logTest("FSM piggybacking " + flags_to_string(toret.response_flags) + " on data packet.");
+            logger::getInstance().logTest("[connection_state_machine::get_to_send_response] FSM piggybacking " + flags_to_string(toret.response_flags) + " on data packet.");
         }
 
         last_response.to_send = false;
@@ -157,7 +157,7 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
         std::lock_guard<std::recursive_mutex> lg(g_connection_state_machine_mutex);
         if (last_response.to_send)
         {
-            logger::getInstance().logTest("FSM sending control packet: " + flags_to_string(last_response.response_flags) + " (Standalone)");
+            logger::getInstance().logTest("[connection_state_machine::send_response_to_network_without_piggybacking] FSM sending control packet: " + flags_to_string(last_response.response_flags) + " (Standalone)");
 
             if (last_response.response_flags & (get_ack_flag()))
                 set_last_ack_sent_time();
@@ -174,8 +174,7 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
         if (current_state.load() != CONNECTION_STATE::LAST_ACK || retries_left <= 0)
             return;
 
-        logger::getInstance().logInfo("LAST_ACK retry " +
-                                      std::to_string(6 - retries_left) + "/5");
+        logger::getInstance().logInfo("[connection_state_machine::last_ack_cb_with_retry] LAST_ACK retry " + std::to_string(6 - retries_left) + "/5");
 
         last_response = {get_fin_flag(), true};
         send_response_to_network_without_piggybacking();
@@ -196,7 +195,7 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
         }
         else
         {
-            logger::getInstance().logWarning("LAST_ACK retries exhausted");
+            logger::getInstance().logWarning("[connection_state_machine::last_ack_cb_with_retry] LAST_ACK retries exhausted");
         }
     }
 
@@ -223,7 +222,7 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
         else
         {
             current_state.store(CONNECTION_STATE::CLOSED);
-            logger::getInstance().logInfo("Transition: TIME_WAIT -> CLOSED (2*RTT elapsed).");
+            logger::getInstance().logInfo("[connection_state_machine::time_wait_cb_with_retry] Transition: TIME_WAIT -> CLOSED (2*RTT elapsed).");
         }
     }
 
@@ -235,12 +234,12 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
     fsm_result close()
     {
         std::lock_guard<std::recursive_mutex> lg(g_connection_state_machine_mutex);
-        logger::getInstance().logInfo("FSM close() called from state: " + state_to_string(current_state.load()));
+        logger::getInstance().logInfo("[connection_state_machine::close] FSM close() called from state: " + state_to_string(current_state.load()));
 
         if (current_state.load() == CONNECTION_STATE::ESTABLISHED)
         {
             current_state.store(CONNECTION_STATE::LAST_ACK);
-            logger::getInstance().logInfo("FSM state transition: ESTABLISHED -> LAST_ACK. Sending FIN.");
+            logger::getInstance().logInfo("[connection_state_machine::close] FSM state transition: ESTABLISHED -> LAST_ACK. Sending FIN.");
 
             last_ack_cb_with_retry();
 
@@ -249,7 +248,7 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
 
         else
         {
-            logger::getInstance().logError("FSM close() called from non-ESTABLISHED state. Sending RST. State: " + state_to_string(current_state.load()));
+            logger::getInstance().logError("[connection_state_machine::close] FSM close() called from non-ESTABLISHED state. Sending RST. State: " + state_to_string(current_state.load()));
             last_response = {get_rst_flag(), true};
             send_response_to_network_without_piggybacking();
 
@@ -261,11 +260,11 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
     fsm_result handle_change(uint8_t rcvd_flags)
     {
         std::lock_guard<std::recursive_mutex> lg(g_connection_state_machine_mutex);
-        logger::getInstance().logTest("FSM handle_change. Current: " + state_to_string(current_state.load()) + ", Received: " + flags_to_string(rcvd_flags));
+        logger::getInstance().logTest("[connection_state_machine::handle_change] FSM handle_change. Current: " + state_to_string(current_state.load()) + ", Received: " + flags_to_string(rcvd_flags));
 
         if (current_state.load() == CONNECTION_STATE::CLOSED)
         {
-            logger::getInstance().logWarning("FSM received packet in CLOSED state. Sending RST.");
+            logger::getInstance().logWarning("[connection_state_machine::handle_change] FSM received packet in CLOSED state. Sending RST.");
             last_response = {get_rst_flag(), true};
             send_response_to_network_without_piggybacking();
             return {false, false};
@@ -279,7 +278,7 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
 
         if (rcvd_flags & get_rst_flag())
         {
-            logger::getInstance().logError("FSM received RST. Transition to CLOSED.");
+            logger::getInstance().logError("[connection_state_machine::handle_change] FSM received RST. Transition to CLOSED.");
             current_state.store(CONNECTION_STATE::CLOSED);
             return {true, true};
         }
@@ -291,7 +290,7 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
             {
                 current_state.store(CONNECTION_STATE::ESTABLISHED);
                 last_response = {get_ack_flag(), true};
-                logger::getInstance().logInfo("FSM state transition: LISTEN -> ESTABLISHED. Sending ACK.");
+                logger::getInstance().logInfo("[connection_state_machine::handle_change] FSM state transition: LISTEN -> ESTABLISHED. Sending ACK.");
             }
             break;
 
@@ -299,7 +298,7 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
             if (rcvd_flags == get_fin_flag())
             {
                 current_state.store(CONNECTION_STATE::TIME_WAIT);
-                logger::getInstance().logInfo("FSM state transition: ESTABLISHED -> TIME_WAIT. Sending ACK and starting TIME_WAIT timer.");
+                logger::getInstance().logInfo("[connection_state_machine::handle_change] FSM state transition: ESTABLISHED -> TIME_WAIT. Sending ACK and starting TIME_WAIT timer.");
 
                 last_response = {get_ack_flag(), true};
                 send_response_to_network_without_piggybacking();
@@ -312,7 +311,7 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
             {
 
                 last_response = {get_ack_flag(), true};
-                logger::getInstance().logWarning("FSM received unexpected SYN in ESTABLISHED. Responding with ACK (Possible retransmission).");
+                logger::getInstance().logWarning("[connection_state_machine::handle_change] FSM received unexpected SYN in ESTABLISHED. Responding with ACK (Possible retransmission).");
             }
 
             break;
@@ -323,7 +322,7 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
 
                 last_response = {get_ack_flag(), true};
                 send_response_to_network_without_piggybacking();
-                logger::getInstance().logWarning("FSM TIME_WAIT received retransmitted FIN. Resending ACK.");
+                logger::getInstance().logWarning("[connection_state_machine::handle_change] FSM TIME_WAIT received retransmitted FIN. Resending ACK.");
             }
             break;
 
@@ -331,13 +330,13 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
             if (rcvd_flags == get_ack_flag())
             {
                 current_state.store(CONNECTION_STATE::CLOSED);
-                logger::getInstance().logInfo("FSM state transition: LAST_ACK -> CLOSED. Received ACK for our FIN.");
+                logger::getInstance().logInfo("[connection_state_machine::handle_change] FSM state transition: LAST_ACK -> CLOSED. Received ACK for our FIN.");
                 return {true, false};
             }
             break;
 
         default:
-            logger::getInstance().logWarning("FSM: Unhandled flags " + flags_to_string(rcvd_flags) + " in state " + state_to_string(current_state.load()));
+            logger::getInstance().logWarning("[connection_state_machine::handle_change] FSM: Unhandled flags " + flags_to_string(rcvd_flags) + " in state " + state_to_string(current_state.load()));
             break;
         }
 

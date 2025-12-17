@@ -252,8 +252,6 @@ class channel_manager : public i_client, public i_channel_manager_for_session_co
         logger::getInstance().logInfo(oss.str());
     }
 
-    friend auto create_server(const char *);
-
     void set_timer_manager(std::shared_ptr<timer_manager> timer_man) { global_timers_manager = timer_man; }
     void set_session_control(std::shared_ptr<i_session_control_for_channel_manager> ses_control)
     {
@@ -306,7 +304,6 @@ public:
 
     ssize_t read_from_channel_nonblocking(channel_id &channel_id_, char *buf, const size_t len) override
     {
-
         if (server_closed.load())
         {
             channel_id_ = INVALID_CHANNEL_ID;
@@ -328,6 +325,7 @@ public:
             std::ostringstream oss;
             oss << "Channel " << channel_id_ << " was in ready queue but not in active channels. Trying next.";
             logger::getInstance().logWarning(oss.str());
+
             return read_from_channel_nonblocking(channel_id_, buf, len);
         }
 
@@ -335,6 +333,7 @@ public:
         if (cur_channel_opt)
         {
             ssize_t bytes_read = cur_channel_opt.value()->read_bytes_to_application(buf, len);
+
             std::ostringstream oss;
             oss << "Non-blocking read on channel " << channel_id_ << " returned " << bytes_read << " bytes.";
             logger::getInstance().logInfo(oss.str());
@@ -374,6 +373,10 @@ public:
                     std::ostringstream oss;
                     oss << "Blocking read on channel " << channel_id_ << " returned " << bytes_read << " bytes.";
                     logger::getInstance().logInfo(oss.str());
+
+                    if (bytes_read == 0)
+                        return read_from_channel_blocking(channel_id_, buf, len);
+
                     return bytes_read;
                 }
                 else
@@ -395,7 +398,6 @@ public:
             logger::getInstance().logWarning(oss.str());
             return -1;
         }
-
         auto ch_opt = active_channels.get(channel_id_);
         if (!ch_opt)
         {

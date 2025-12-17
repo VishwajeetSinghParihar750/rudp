@@ -100,7 +100,7 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
         : current_state(CONNECTION_STATE::SYN_SENT), on_send_control_packet_to_transport(f), global_timer_manager(timer_man)
     {
         std::ostringstream oss;
-        oss << "FSM initialized in state: " << connection_state_to_string(current_state.load());
+        oss << "[connection_state_machine::connection_state_machine] FSM initialized in state: " << connection_state_to_string(current_state.load());
         logger::getInstance().logInfo(oss.str());
     }
 
@@ -110,14 +110,14 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
         if (current_state.load() != CONNECTION_STATE::CLOSED)
         {
             std::ostringstream oss;
-            oss << "FSM destructed while in state: " << connection_state_to_string(current_state.load()) << ". Sending RST.";
+            oss << "[connection_state_machine::~connection_state_machine] FSM destructed while in state: " << connection_state_to_string(current_state.load()) << ". Sending RST.";
             logger::getInstance().logWarning(oss.str());
             last_response = {get_rst_flag(), true};
             send_response_to_network_without_piggybacking();
         }
         else
         {
-            logger::getInstance().logInfo("FSM destructed gracefully in CLOSED state.");
+            logger::getInstance().logInfo("[connection_state_machine::~connection_state_machine] FSM destructed gracefully in CLOSED state.");
         }
     }
     bool can_exchange_data()
@@ -164,7 +164,7 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
         if (toret.to_send)
         {
             std::ostringstream oss;
-            oss << "Piggybacking control flags: " << control_flags_to_string(toret.response_flags) << ". Current state: " << connection_state_to_string(current_state.load());
+            oss << "[connection_state_machine::get_to_send_response] Piggybacking control flags: " << control_flags_to_string(toret.response_flags) << ". Current state: " << connection_state_to_string(current_state.load());
             logger::getInstance().logInfo(oss.str());
         }
 
@@ -180,7 +180,7 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
                 set_last_ack_sent_time();
 
             std::ostringstream oss;
-            oss << "Sending standalone control packet with flags: " << control_flags_to_string(last_response.response_flags) << ". Current state: " << connection_state_to_string(current_state.load());
+            oss << "[connection_state_machine::send_response_to_network_without_piggybacking] Sending standalone control packet with flags: " << control_flags_to_string(last_response.response_flags) << ". Current state: " << connection_state_to_string(current_state.load());
             logger::getInstance().logInfo(oss.str());
 
             on_send_control_packet_to_transport(last_response.response_flags);
@@ -202,6 +202,8 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
 
         logger::getInstance().logInfo("LAST_ACK retry " +
                                       std::to_string(6 - retries_left) + "/5");
+        // Context-rich log
+        logger::getInstance().logInfo("[connection_state_machine::last_ack_cb_with_retry] LAST_ACK retry " + std::to_string(6 - retries_left) + "/5");
 
         last_response = {get_fin_flag(), true};
         send_response_to_network_without_piggybacking();
@@ -222,7 +224,7 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
         }
         else
         {
-            logger::getInstance().logWarning("LAST_ACK retries exhausted");
+            logger::getInstance().logWarning("[connection_state_machine::last_ack_cb_with_retry] LAST_ACK retries exhausted");
         }
     }
 
@@ -249,7 +251,7 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
         else
         {
             current_state.store(CONNECTION_STATE::CLOSED);
-            logger::getInstance().logInfo("Transition: TIME_WAIT -> CLOSED (2*RTT elapsed).");
+            logger::getInstance().logInfo("[connection_state_machine::time_wait_cb_with_retry] Transition: TIME_WAIT -> CLOSED (2*RTT elapsed).");
         }
     }
 
@@ -267,7 +269,7 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
         if (old_state == CONNECTION_STATE::ESTABLISHED)
         {
             current_state.store(CONNECTION_STATE::LAST_ACK);
-            logger::getInstance().logInfo("Application requested close. Transitioning to LAST_ACK state. Sending FIN.");
+            logger::getInstance().logInfo("[connection_state_machine::close] Application requested close. Transitioning to LAST_ACK state. Sending FIN.");
 
             last_ack_cb_with_retry();
 
@@ -278,7 +280,7 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
         {
             std::ostringstream oss;
             oss << "Application requested close from state: " << connection_state_to_string(old_state) << ". Sending RST and forcing CLOSED.";
-            logger::getInstance().logWarning(oss.str());
+            logger::getInstance().logWarning(std::string("[connection_state_machine::close] ") + oss.str());
             last_response = {get_rst_flag(), true};
             send_response_to_network_without_piggybacking();
 
@@ -294,7 +296,7 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
 
         std::ostringstream oss_rcv;
         oss_rcv << "Received flags: " << control_flags_to_string(rcvd_flags) << ". Current state: " << connection_state_to_string(current_state.load());
-        logger::getInstance().logInfo(oss_rcv.str());
+        logger::getInstance().logInfo(std::string("[connection_state_machine::handle_change] ") + oss_rcv.str());
 
         if (current_state.load() == CONNECTION_STATE::CLOSED)
         {
