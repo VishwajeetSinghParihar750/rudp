@@ -6,18 +6,24 @@
 #include <atomic>
 #include <vector>
 
+#include "../common/transport_addr.hpp"
+#include "../common/timer_manager.hpp"
+#include "../common/timer_info.hpp"
+#include "../common/thread_safe_unordered_map.hpp"
 #include "../common/rudp_protocol_packet.hpp"
+#include "../common/logger.hpp"
+#include "../common/types.hpp"
+
 #include "i_udp_for_session_control.hpp"
 #include "i_session_control_for_channel_manager.hpp"
 #include "i_session_control_for_udp.hpp"
 #include "i_channel_manager_for_session_control.hpp"
 
-#include "transport_addr.hpp"
-#include "rudp_protocol.hpp"
-#include "../common/timer_manager.hpp"
-#include "../common/thread_safe_unordered_map.hpp"
-#include "types.hpp"
-#include "../common/logger.hpp"
+struct session_control_header
+{
+    uint8_t flags;
+    uint32_t reserved;
+};
 
 class i_server;
 
@@ -392,7 +398,7 @@ class session_control : public i_session_control_for_udp, public i_session_contr
             return;
         }
         connection_state_machine::to_send_response res = fsm_opt.value()->get_to_send_response();
-        rudp_protocol::session_control_header header;
+        session_control_header header;
         header.flags = 0;
         header.reserved = 0;
 
@@ -534,7 +540,7 @@ class session_control : public i_session_control_for_udp, public i_session_contr
     {
         clients_fsm.insert(cl_id, std::make_shared<connection_state_machine>([source_addr, cl_id, this](uint8_t fsm_flags)
                                                                              {
-                                                                                char buf[rudp_protocol::SESSION_CONTROL_HEADER_SIZE] = {0};
+                                                                                char buf[rudp_protocol_packet::SESSION_CONTROL_HEADER_SIZE] = {0};
 
                                                                                 uint32_t net_reserved = 0;
                                                                                 

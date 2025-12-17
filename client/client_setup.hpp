@@ -4,11 +4,11 @@
 #include <string>
 
 #include "i_client.hpp"
-
 #include "channel_manager.hpp"
-#include "../common/timer_manager.hpp"
 #include "session_control.hpp"
 #include "udp.hpp"
+
+#include "../common/timer_manager.hpp"
 
 std::shared_ptr<i_client> create_client(const char *HOST, const char *PORT)
 {

@@ -1,6 +1,6 @@
 #pragma once
 #include <memory>
-#include "types.hpp"
+#include "../common/types.hpp"
 
 class rudp_protocol_packet;
 

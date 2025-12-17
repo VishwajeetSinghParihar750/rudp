@@ -1,12 +1,11 @@
 #pragma once
 
 #include "../../i_channel.hpp"
-#include "../../../common/rudp_protocol_packet.hpp"
-#include "../../rudp_protocol.hpp"
+#include "../../rudp_protocol_packet.hpp"
 #include "../../types.hpp"
-#include "../../../common/timer_info.hpp"
-#include "../../../common/timer_manager.hpp"
-#include "../../../common/logger.hpp"
+#include "../../timer_info.hpp"
+#include "../../timer_manager.hpp"
+#include "../../logger.hpp"
 
 #include <map>
 #include <deque>
@@ -777,7 +776,7 @@ public:
         if (!pkt)
             return;
 
-        const size_t off = rudp_protocol::CHANNEL_HEADER_OFFSET;
+        const size_t off = rudp_protocol_packet::CHANNEL_HEADER_OFFSET;
         const char *buf = pkt->get_const_buffer();
         size_t len = pkt->get_length();
 

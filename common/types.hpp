@@ -49,3 +49,16 @@ inline uint64_t get_random_uint64_t()
 {
     return get_uid_distribution()(get_rng());
 }
+
+inline uint64_t htonll(uint64_t hostval)
+{
+#if __BYTE_ORDER__ == __BIG_ENDIAN
+    return hostval;
+#else
+    uint32_t l = hostval >> 32, r = (hostval & ((1ll << 32) - 1));
+    l = htonl(l), r = htonl(r);
+    return (uint64_t(r) << 32) | l;
+
+#endif
+}
+inline uint64_t ntohll(uint64_t netval) { return htonll(netval); }

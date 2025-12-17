@@ -3,7 +3,7 @@
 
 #include <inttypes.h>
 #include <memory>
-#include "types.hpp"
+#include "../common/types.hpp"
 
 class i_server
 {

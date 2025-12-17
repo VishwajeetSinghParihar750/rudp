@@ -13,25 +13,31 @@
 #include <utility>
 #include <chrono>
 
-#include "types.hpp"
+#include "../common/types.hpp"
 #include "../common/thread_safe_unordered_map.hpp"
 #include "../common/thread_safe_unordered_set.hpp"
-#include "i_channel.hpp"
-#include "udp.hpp"
-#include "rudp_protocol.hpp"
-#include "channels/realible_ordered_channel/reliable_ordered_channel.hpp"
-#include "i_server.hpp"
-#include "i_channel_manager_for_session_control.hpp"
+#include "../common/i_channel.hpp"
+#include "../common/channels/reliable_ordered_channel/reliable_ordered_channel.hpp"
 #include "../common/thread_safe_priority_queue.hpp"
-#include "i_session_control_for_channel_manager.hpp"
 #include "../common/timer_manager.hpp"
 #include "../common/logger.hpp"
+
+#include "udp.hpp"
+#include "i_session_control_for_channel_manager.hpp"
+#include "i_server.hpp"
+#include "i_channel_manager_for_session_control.hpp"
 
 enum class READ_FROM_CHANNEL_ERROR : ssize_t
 {
     CLIENT_DISCONNECTED = -1,
     NO_PENDING_DATA = -2
 
+};
+
+struct channel_manager_header
+{
+    channel_id ch_id;
+    channel_manager_header(const channel_id &id) : ch_id(id) {}
 };
 struct rcv_ready_queue_info
 {
@@ -69,10 +75,10 @@ class channel_manager : public i_server, public i_channel_manager_for_session_co
 
     thread_safe_unordered_set<client_id> pending_disconnects;
 
-    void serialize_channel_manager_header(rudp_protocol_packet &pkt, const rudp_protocol::channel_manager_header &c_header)
+    void serialize_channel_manager_header(rudp_protocol_packet &pkt, const channel_manager_header &c_header)
     {
-        const size_t off = rudp_protocol::CHANNEL_MANAGER_HEADER_OFFSET;
-        const size_t sz = rudp_protocol::CHANNEL_MANAGER_HEADER_SIZE;
+        const size_t off = rudp_protocol_packet::CHANNEL_MANAGER_HEADER_OFFSET;
+        const size_t sz = rudp_protocol_packet::CHANNEL_MANAGER_HEADER_SIZE;
 
         if (pkt.get_length() < off + sz)
         {
@@ -85,10 +91,10 @@ class channel_manager : public i_server, public i_channel_manager_for_session_co
         memcpy(pkt.get_buffer() + off, &net, sizeof(net));
     }
 
-    rudp_protocol::channel_manager_header deserialize_channel_manager_header(rudp_protocol_packet &pkt)
+    channel_manager_header deserialize_channel_manager_header(rudp_protocol_packet &pkt)
     {
-        const size_t off = rudp_protocol::CHANNEL_MANAGER_HEADER_OFFSET;
-        const size_t sz = rudp_protocol::CHANNEL_MANAGER_HEADER_SIZE;
+        const size_t off = rudp_protocol_packet::CHANNEL_MANAGER_HEADER_OFFSET;
+        const size_t sz = rudp_protocol_packet::CHANNEL_MANAGER_HEADER_SIZE;
 
         if (pkt.get_length() < off + sz)
         {
@@ -353,13 +359,13 @@ public:
             return;
         }
 
-        if (pkt->get_length() < rudp_protocol_packet::CHANNEL_MANAGER_HEADER_OFFEST + rudp_protocol_packet::CHANNEL_MANAGER_HEADER_SIZE)
+        if (pkt->get_length() < rudp_protocol_packet::CHANNEL_MANAGER_HEADER_OFFSET + rudp_protocol_packet::CHANNEL_MANAGER_HEADER_SIZE)
         {
             logger::getInstance().logError(" packet too small for channel manager ");
             return;
         }
 
-        rudp_protocol::channel_manager_header cm_header = deserialize_channel_manager_header(*pkt);
+        channel_manager_header cm_header = deserialize_channel_manager_header(*pkt);
         if (channels.contains(cm_header.ch_id))
         {
             auto client_map = client_map_opt.value();

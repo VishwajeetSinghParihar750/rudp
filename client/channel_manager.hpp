@@ -14,19 +14,25 @@
 #include <chrono>
 #include <sstream>
 
-#include "types.hpp"
+#include "../common/types.hpp"
 #include "../common/thread_safe_unordered_map.hpp"
-#include "i_channel.hpp"
-#include "udp.hpp"
-#include "rudp_protocol.hpp"
-#include "channels/realible_ordered_channel/reliable_ordered_channel.hpp"
-#include "i_client.hpp"
-#include "i_channel_manager_for_session_control.hpp"
+#include "../common/i_channel.hpp"
+#include "../common/channels/reliable_ordered_channel/reliable_ordered_channel.hpp"
 #include "../common/thread_safe_priority_queue.hpp"
-#include "i_session_control_for_channel_manager.hpp"
 #include "../common/timer_manager.hpp"
 #include "../common/logger.hpp"
+#include "../common/rudp_protocol_packet.hpp"
 
+#include "i_client.hpp"
+#include "i_channel_manager_for_session_control.hpp"
+#include "i_session_control_for_channel_manager.hpp"
+#include "udp.hpp"
+
+struct channel_manager_header
+{
+    channel_id ch_id;
+    channel_manager_header(const channel_id &id) : ch_id(id) {}
+};
 enum class READ_FROM_CHANNEL_ERROR : ssize_t
 {
     SERVER_DISCONNECTED = -1,
@@ -70,10 +76,11 @@ class channel_manager : public i_client, public i_channel_manager_for_session_co
     std::shared_ptr<i_session_control_for_channel_manager> session_control_;
 
     std::atomic<bool> server_closed = false;
-    void serialize_channel_manager_header(rudp_protocol_packet &pkt, const rudp_protocol::channel_manager_header &c_header)
+    void serialize_channel_manager_header(rudp_protocol_packet &pkt, const channel_manager_header &c_header)
     {
-        const size_t off = rudp_protocol::CHANNEL_MANAGER_HEADER_OFFSET;
-        const size_t sz = rudp_protocol::CHANNEL_MANAGER_HEADER_SIZE;
+
+        const size_t off = rudp_protocol_packet::CHANNEL_MANAGER_HEADER_OFFSET;
+        const size_t sz = rudp_protocol_packet::CHANNEL_MANAGER_HEADER_SIZE;
 
         if (pkt.get_length() < off + sz)
         {
@@ -86,10 +93,10 @@ class channel_manager : public i_client, public i_channel_manager_for_session_co
         memcpy(pkt.get_buffer() + off, &net, sizeof(net));
     }
 
-    rudp_protocol::channel_manager_header deserialize_channel_manager_header(rudp_protocol_packet &pkt)
+    channel_manager_header deserialize_channel_manager_header(rudp_protocol_packet &pkt)
     {
-        const size_t off = rudp_protocol::CHANNEL_MANAGER_HEADER_OFFSET;
-        const size_t sz = rudp_protocol::CHANNEL_MANAGER_HEADER_SIZE;
+        const size_t off = rudp_protocol_packet::CHANNEL_MANAGER_HEADER_OFFSET;
+        const size_t sz = rudp_protocol_packet::CHANNEL_MANAGER_HEADER_SIZE;
 
         if (pkt.get_length() < off + sz)
         {
@@ -363,13 +370,13 @@ public:
     }
     void on_transport_receive(std::unique_ptr<rudp_protocol_packet> pkt) override
     {
-        if (pkt->get_length() < rudp_protocol_packet::CHANNEL_MANAGER_HEADER_OFFEST + rudp_protocol_packet::CHANNEL_MANAGER_HEADER_SIZE)
+        if (pkt->get_length() < rudp_protocol_packet::CHANNEL_MANAGER_HEADER_OFFSET + rudp_protocol_packet::CHANNEL_MANAGER_HEADER_SIZE)
         {
             logger::getInstance().logError(" packet too small for channel manager ");
             return;
         }
 
-        rudp_protocol::channel_manager_header cm_header = deserialize_channel_manager_header(*pkt);
+        channel_manager_header cm_header = deserialize_channel_manager_header(*pkt);
         channel_id ch_id = cm_header.ch_id;
 
         auto ch_opt = active_channels.get(ch_id);
