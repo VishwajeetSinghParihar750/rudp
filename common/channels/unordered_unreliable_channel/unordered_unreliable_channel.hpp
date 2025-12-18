@@ -183,7 +183,7 @@ namespace unordered_unreliable_channel
 
             if (!packet_codec::deserialize_header(packet, packet_size, out_header))
             {
-                logger::getInstance().logWarning("[receive_window::receive_packet] Packet failed header deserialization (checksum fail or malformed).");
+                LOG_WARN("[receive_window::receive_packet] Packet failed header deserialization (checksum fail or malformed).");
                 return false;
             }
 
@@ -215,7 +215,6 @@ namespace unordered_unreliable_channel
 
         std::unique_ptr<rudp_protocol_packet> on_transport_send()
         {
-            // would add headers if had any, but none
             auto pkt = snd_window.get_rudp_protocol_pkt();
             if (pkt == nullptr)
                 return nullptr;
@@ -229,12 +228,12 @@ namespace unordered_unreliable_channel
     public:
         explicit unordered_unreliable_channel(channel_id id) : ch_id(id)
         {
-            logger::getInstance().logInfo(std::string("[unordered_unreliable_channel::unordered_unreliable_channel] Unreliable Unordered Channel ") + std::to_string(ch_id) + " created.");
+            LOG_INFO("[unordered_unreliable_channel::unordered_unreliable_channel] Unreliable Unordered Channel " << ch_id << " created.");
         }
 
         std::unique_ptr<i_channel> clone() const override
         {
-            logger::getInstance().logError("[unordered_unreliable_channel::clone] Cloning not supported rn ");
+            LOG_ERROR("[unordered_unreliable_channel::clone] Cloning not supported rn ");
             return nullptr;
         }
 
@@ -256,13 +255,13 @@ namespace unordered_unreliable_channel
             channel_header header{};
             if (!rcv_window.receive_packet(std::move(pkt), header))
             {
-                logger::getInstance().logWarning("[unordered_unreliable_channel::on_transport_receive] Failed to process received packet in receive window. Dropped.");
+                LOG_WARN("[unordered_unreliable_channel::on_transport_receive] Failed to process received packet in receive window. Dropped.");
                 return;
             }
 
             if (rcv_window.get_available_bytes_cnt() > 0)
             {
-                logger::getInstance().logInfo("[unordered_unreliable_channel::on_transport_receive] Received data payload. Notifying application.");
+                LOG_INFO("[unordered_unreliable_channel::on_transport_receive] Received data payload. Notifying application.");
                 if (on_app_data_ready)
                     on_app_data_ready();
             }
@@ -280,32 +279,31 @@ namespace unordered_unreliable_channel
         {
             if (snd_window.receive_bytes(buf, len))
             {
-                logger::getInstance().logInfo(std::string("[unordered_unreliable_channel::write_bytes_from_application] Application wrote ") + std::to_string(len) + " bytes. Attempting to send immediately.");
+                LOG_INFO("[unordered_unreliable_channel::write_bytes_from_application] Application wrote " << len << " bytes. Attempting to send immediately.");
                 auto pkt = on_transport_send();
                 if (pkt && on_net_data_ready)
                     on_net_data_ready(std::move(pkt));
                 return len;
             }
-            // only doing full packet sends no partial sending,since unreliable unordered
-            logger::getInstance().logWarning("[unordered_unreliable_channel::write_bytes_from_application] Application write failed (buffer full).");
+            LOG_WARN("[unordered_unreliable_channel::write_bytes_from_application] Application write failed (buffer full).");
             return 0;
         }
 
         void set_on_app_data_ready(std::function<void()> f) override
         {
             on_app_data_ready = f;
-            logger::getInstance().logTest("[unordered_unreliable_channel::set_on_app_data_ready] on_app_data_ready callback set.");
+            LOG_TEST("[unordered_unreliable_channel::set_on_app_data_ready] on_app_data_ready callback set.");
         }
 
         void set_on_net_data_ready(std::function<void(std::unique_ptr<rudp_protocol_packet>)> f) override
         {
             on_net_data_ready = f;
-            logger::getInstance().logTest("[unordered_unreliable_channel::set_on_net_data_ready] on_net_data_ready callback set.");
+            LOG_TEST("[unordered_unreliable_channel::set_on_net_data_ready] on_net_data_ready callback set.");
         }
 
         void set_timer_manager(std::shared_ptr<timer_manager> timer_man) override
         {
-            logger::getInstance().logInfo("[unordered_unreliable_channel::set_timer_manager] Timer manager not needed for unordered unreliable channel.");
+            LOG_INFO("[unordered_unreliable_channel::set_timer_manager] Timer manager not needed for unordered unreliable channel.");
         }
     };
 }

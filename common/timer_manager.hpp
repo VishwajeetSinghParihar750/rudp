@@ -30,6 +30,7 @@ public:
 
                                 if(stoken.stop_requested()) return;
 
+
                                 if(got_timer && timerptr && timerptr->has_expired() ) {
                                     timerptr->execute_on_expire_callback();
                                 }

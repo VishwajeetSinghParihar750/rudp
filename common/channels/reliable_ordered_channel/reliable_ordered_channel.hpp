@@ -27,7 +27,7 @@ namespace reliable_ordered_channel
     namespace channel_config
     {
         constexpr uint16_t HEADER_SIZE = 14;
-        constexpr uint32_t DEFAULT_BUFFER_SIZE = 20 * 1024 * 1024;
+        constexpr uint32_t DEFAULT_BUFFER_SIZE = 128 * 1024 * 1024;
         constexpr uint16_t MAX_MSS = 1400;
         constexpr uint64_t RTO_MS = 200;
         constexpr uint32_t MAX_RETRANSMITS = 5;
@@ -69,7 +69,7 @@ namespace reliable_ordered_channel
         {
             if (total_size < channel_config::HEADER_SIZE)
             {
-                logger::getInstance().logWarning(std::string("[packet_codec::deserialize_header] Failed to deserialize header: Total size too small (") + std::to_string(total_size) + ")");
+                LOG_WARN("[packet_codec::deserialize_header] Failed to deserialize header: Total size too small (" << total_size << ")");
                 return false;
             }
 
@@ -81,7 +81,7 @@ namespace reliable_ordered_channel
 
             if (!verify_checksum(buf, total_size, out_header.checksum))
             {
-                logger::getInstance().logWarning("[packet_codec::deserialize_header] Failed to deserialize header: Checksum mismatch. Packet dropped.");
+                LOG_WARN("[packet_codec::deserialize_header] Failed to deserialize header: Checksum mismatch. Packet dropped.");
                 return false;
             }
             return true;
@@ -93,7 +93,7 @@ namespace reliable_ordered_channel
             uint32_t ack = htonl(header.ack_no);
             uint16_t win = htons(header.win_sz);
             uint16_t flg = htons(header.flags);
-            uint16_t zero = 0; // Placeholder for checksum
+            uint16_t zero = 0; 
 
             memcpy(buf + 0, &seq, 4);
             memcpy(buf + 4, &ack, 4);
@@ -122,7 +122,7 @@ namespace reliable_ordered_channel
 
             for (uint32_t i = 0; i < channel_config::HEADER_SIZE; i += 2)
             {
-                if (i == 12) // Skip checksum field
+                if (i == 12) 
                     continue;
                 uint16_t val = (static_cast<uint8_t>(buf[i]) << 8) | static_cast<uint8_t>(buf[i + 1]);
                 sum += val;
@@ -153,7 +153,7 @@ namespace reliable_ordered_channel
         explicit circular_buffer(uint32_t capacity = channel_config::DEFAULT_BUFFER_SIZE)
             : data(std::make_unique<char[]>(capacity)), size(capacity)
         {
-            logger::getInstance().logInfo(std::string("[circular_buffer::circular_buffer] Circular buffer created with capacity: ") + std::to_string(size));
+            LOG_INFO("[circular_buffer::circular_buffer] Circular buffer created with capacity: " << size);
         }
 
         void write_at_position(uint32_t position, const char *src, uint32_t len)
@@ -170,7 +170,7 @@ namespace reliable_ordered_channel
                 memcpy(data.get() + idx, src, first_chunk);
                 memcpy(data.get(), src + first_chunk, len - first_chunk);
             }
-            logger::getInstance().logTest(std::string("[circular_buffer::write_at_position] Wrote ") + std::to_string(len) + " bytes to buffer at global pos " + std::to_string(position));
+            LOG_TEST("[circular_buffer::write_at_position] Wrote " << len << " bytes to buffer at global pos " << position);
         }
 
         void read_from_position(uint32_t position, char *dst, uint32_t len)
@@ -187,7 +187,7 @@ namespace reliable_ordered_channel
                 memcpy(dst, data.get() + idx, first_chunk);
                 memcpy(dst + first_chunk, data.get(), len - first_chunk);
             }
-            logger::getInstance().logTest(std::string("[circular_buffer::read_from_position] Read ") + std::to_string(len) + " bytes from buffer at global pos " + std::to_string(position));
+            LOG_TEST("[circular_buffer::read_from_position] Read " << len << " bytes from buffer at global pos " << position);
         }
 
         uint32_t capacity() const { return size; }
@@ -215,7 +215,7 @@ namespace reliable_ordered_channel
             std::lock_guard<std::mutex> guard(seq_mutex);
             uint32_t old_val = seq_no;
             seq_no += delta;
-            logger::getInstance().logTest(std::string("[sequence_tracker::advance] Sequence advanced by ") + std::to_string(delta) + " from " + std::to_string(old_val) + " to " + std::to_string(seq_no));
+            LOG_TEST("[sequence_tracker::advance] Sequence advanced by " << delta << " from " << old_val << " to " << seq_no);
             return old_val;
         }
     };
@@ -238,7 +238,7 @@ namespace reliable_ordered_channel
             std::lock_guard<std::mutex> guard(lock);
             uint16_t old_win = remote_window;
             remote_window = window_size;
-            logger::getInstance().logInfo(std::string("[flow_controller::update_remote_window] Remote window updated from ") + std::to_string(old_win) + " to " + std::to_string(window_size));
+            LOG_INFO("[flow_controller::update_remote_window] Remote window updated from " << old_win << " to " << window_size);
         }
 
         bool can_send_bytes(uint32_t in_flight) const
@@ -267,7 +267,7 @@ namespace reliable_ordered_channel
         {
             std::lock_guard<std::mutex> guard(lock);
             segments.push_back({seq_no, length, get_current_time_ms(), 0});
-            logger::getInstance().logTest(std::string("[retransmission_manager::add_segment] Added segment to retransmission queue: Seq=") + std::to_string(seq_no) + ", Len=" + std::to_string(length));
+            LOG_TEST("[retransmission_manager::add_segment] Added segment to retransmission queue: Seq=" << seq_no << ", Len=" << length);
         }
 
         bool get_retransmit_segment(inflight_segment &out_seg)
@@ -286,15 +286,14 @@ namespace reliable_ordered_channel
                 {
                     if (seg.retransmit_count >= channel_config::MAX_RETRANSMITS)
                     {
-                        logger::getInstance().logCritical(std::string("[retransmission_manager::get_retransmit_segment] Segment ") + std::to_string(seg.seq_no) + " reached max retransmits (" + std::to_string(channel_config::MAX_RETRANSMITS) + "). Connection failure likely.");
-                        // In a real application, you'd likely trigger a connection termination here.
+                        LOG_CRITICAL("[retransmission_manager::get_retransmit_segment] Segment " << seg.seq_no << " reached max retransmits (" << channel_config::MAX_RETRANSMITS << "). Connection failure likely.");
                         continue;
                     }
 
                     seg.last_sent_time = now;
                     seg.retransmit_count++;
                     out_seg = seg;
-                    logger::getInstance().logWarning(std::string("[retransmission_manager::get_retransmit_segment] Retransmitting segment: Seq=") + std::to_string(out_seg.seq_no) + ", Retransmit Count=" + std::to_string(out_seg.retransmit_count));
+                    LOG_WARN("[retransmission_manager::get_retransmit_segment] Retransmitting segment: Seq=" << out_seg.seq_no << ", Retransmit Count=" << out_seg.retransmit_count);
                     return true;
                 }
             }
@@ -313,7 +312,7 @@ namespace reliable_ordered_channel
             }
             if (acknowledged_bytes > 0)
             {
-                logger::getInstance().logInfo(std::string("[retransmission_manager::acknowledge_up_to] Acknowledged ") + std::to_string(acknowledged_bytes) + " bytes. New SND_UNA=" + std::to_string(ack_no));
+                LOG_INFO("[retransmission_manager::acknowledge_up_to] Acknowledged " << acknowledged_bytes << " bytes. New SND_UNA=" << ack_no);
             }
         }
     };
@@ -338,20 +337,20 @@ namespace reliable_ordered_channel
         {
             if (!packet_codec::deserialize_header(packet, packet_size, out_header))
             {
-                logger::getInstance().logWarning("[receive_window::receive_packet] Packet failed header deserialization (checksum fail or malformed).");
+                LOG_WARN("[receive_window::receive_packet] Packet failed header deserialization (checksum fail or malformed).");
                 return false;
             }
 
             uint32_t payload_len = packet_size - channel_config::HEADER_SIZE;
-            logger::getInstance().logTest(std::string("[receive_window::receive_packet] Received packet: Seq=") + std::to_string(out_header.seq_no) + ", Ack=" + std::to_string(out_header.ack_no) + ", Win=" + std::to_string(out_header.win_sz) + ", PayloadLen=" + std::to_string(payload_len));
+            LOG_TEST("[receive_window::receive_packet] Received packet: Seq=" << out_header.seq_no << ", Ack=" << out_header.ack_no << ", Win=" << out_header.win_sz << ", PayloadLen=" << payload_len);
 
             if (payload_len == 0 && (out_header.flags & static_cast<uint16_t>(channel_flags::ACK)) == 0)
-                return true; // No data, no ACK flag. Keepalive?
+                return true; 
 
             std::lock_guard<std::mutex> guard(lock);
 
             if (payload_len == 0)
-                return true; // ACK-only packet
+                return true; 
 
             const char *payload = packet + channel_config::HEADER_SIZE;
             uint32_t seg_start = out_header.seq_no;
@@ -361,57 +360,52 @@ namespace reliable_ordered_channel
 
             if (seg_end <= app_read_pos)
             {
-                logger::getInstance().logInfo(std::string("[receive_window::receive_packet] Packet ") + std::to_string(seg_start) + " is old/already read. Sending ACK.");
+                LOG_INFO("[receive_window::receive_packet] Packet " << seg_start << " is old/already read. Sending ACK.");
                 ack_pending.store(true, std::memory_order_release);
                 return true;
             }
 
             if (seg_start >= app_read_pos + buffer.capacity())
             {
-                logger::getInstance().logWarning(std::string("[receive_window::receive_packet] Packet ") + std::to_string(seg_start) + " is outside receive window (overflow). Dropped.");
+                LOG_WARN("[receive_window::receive_packet] Packet " << seg_start << " is outside receive window (overflow). Dropped.");
                 return false;
             }
 
-            // This check is the essence of reliability and ordering:
             if (seg_start == current_rcv_nxt)
             {
-                // In-order segment
                 buffer.write_at_position(current_rcv_nxt, payload, payload_len);
                 rcv_nxt.advance(payload_len);
-                logger::getInstance().logInfo(std::string("[receive_window::receive_packet] Received in-order segment: Seq=") + std::to_string(seg_start) + ". New RCV_NXT=" + std::to_string(rcv_nxt.get()));
+                LOG_INFO("[receive_window::receive_packet] Received in-order segment: Seq=" << seg_start << ". New RCV_NXT=" << rcv_nxt.get());
                 advance_with_sack();
                 ack_pending.store(true, std::memory_order_release);
             }
             else if (seg_start > current_rcv_nxt)
             {
-                // Out-of-order segment
                 if (out_of_order_segments.find(seg_start) == out_of_order_segments.end())
                 {
                     out_of_order_segments[seg_start] = std::vector<char>(payload, payload + payload_len);
-                    logger::getInstance().logWarning(std::string("[receive_window::receive_packet] Received out-of-order segment: Seq=") + std::to_string(seg_start) + ". Stored.");
+                    LOG_WARN("[receive_window::receive_packet] Received out-of-order segment: Seq=" << seg_start << ". Stored.");
                 }
                 else
                 {
-                    logger::getInstance().logWarning(std::string("[receive_window::receive_packet] Received duplicate out-of-order segment: Seq=") + std::to_string(seg_start) + ". Dropped duplicate.");
+                    LOG_WARN("[receive_window::receive_packet] Received duplicate out-of-order segment: Seq=" << seg_start << ". Dropped duplicate.");
                 }
                 ack_pending.store(true, std::memory_order_release);
             }
-            else // seg_start < current_rcv_nxt
+            else 
             {
-                // Duplicate or partial overlap of already received data
                 if (seg_end > current_rcv_nxt)
                 {
-                    // Partial overlap (retransmission of unacknowledged data)
                     uint32_t overlap = current_rcv_nxt - seg_start;
                     uint32_t new_data_len = seg_end - current_rcv_nxt;
                     buffer.write_at_position(current_rcv_nxt, payload + overlap, new_data_len);
                     rcv_nxt.advance(new_data_len);
-                    logger::getInstance().logWarning(std::string("[receive_window::receive_packet] Received partial overlap (retrans): Seg=") + std::to_string(seg_start) + ", New Data=" + std::to_string(new_data_len) + ". New RCV_NXT=" + std::to_string(rcv_nxt.get()));
+                    LOG_WARN("[receive_window::receive_packet] Received partial overlap (retrans): Seg=" << seg_start << ", New Data=" << new_data_len << ". New RCV_NXT=" << rcv_nxt.get());
                     advance_with_sack();
                 }
                 else
                 {
-                    logger::getInstance().logInfo(std::string("[receive_window::receive_packet] Received full duplicate segment: Seq=") + std::to_string(seg_start) + ". Ignored data.");
+                    LOG_INFO("[receive_window::receive_packet] Received full duplicate segment: Seq=" << seg_start << ". Ignored data.");
                 }
                 ack_pending.store(true, std::memory_order_release);
             }
@@ -421,7 +415,6 @@ namespace reliable_ordered_channel
 
         uint32_t get_available_bytes_cnt()
         {
-
             std::lock_guard<std::mutex> guard(lock);
             uint32_t current_rcv = rcv_nxt.get();
             uint32_t current_app_read = app_read_seq.get();
@@ -438,14 +431,14 @@ namespace reliable_ordered_channel
 
             if (available == 0)
             {
-                logger::getInstance().logTest("[receive_window::read_data] Application read: 0 bytes available.");
+                LOG_TEST("[receive_window::read_data] Application read: 0 bytes available.");
                 return 0;
             }
 
             uint32_t to_read = std::min(available, len);
             buffer.read_from_position(current_app_read, out_buf, to_read);
             app_read_seq.advance(to_read);
-            logger::getInstance().logInfo(std::string("[receive_window::read_data] Application read: ") + std::to_string(to_read) + " bytes. New APP_READ_SEQ=" + std::to_string(app_read_seq.get()));
+            LOG_INFO("[receive_window::read_data] Application read: " << to_read << " bytes. New APP_READ_SEQ=" << app_read_seq.get());
 
             return static_cast<ssize_t>(to_read);
         }
@@ -464,7 +457,7 @@ namespace reliable_ordered_channel
         {
             if (ack_pending.exchange(false, std::memory_order_release))
             {
-                logger::getInstance().logTest("[receive_window::clear_ack_pending] Cleared ACK pending flag.");
+                LOG_TEST("[receive_window::clear_ack_pending] Cleared ACK pending flag.");
             }
         }
         uint32_t get_initial_seq_no() const { return rcv_nxt.get(); }
@@ -479,7 +472,7 @@ namespace reliable_ordered_channel
                 auto it = out_of_order_segments.begin();
                 if (it->first == current_rcv)
                 {
-                    logger::getInstance().logInfo(std::string("[receive_window::advance_with_sack] SACK-ed segment found: Seq=") + std::to_string(it->first) + ". Advancing RCV_NXT.");
+                    LOG_INFO("[receive_window::advance_with_sack] SACK-ed segment found: Seq=" << it->first << ". Advancing RCV_NXT.");
                     buffer.write_at_position(current_rcv, it->second.data(), it->second.size());
                     current_rcv += it->second.size();
                     out_of_order_segments.erase(it);
@@ -492,7 +485,7 @@ namespace reliable_ordered_channel
             if (current_rcv > rcv_nxt.get())
             {
                 rcv_nxt.set(current_rcv);
-                logger::getInstance().logInfo(std::string("[receive_window::advance_with_sack] RCV_NXT advanced with SACK consolidation. New RCV_NXT=") + std::to_string(rcv_nxt.get()));
+                LOG_INFO("[receive_window::advance_with_sack] RCV_NXT advanced with SACK consolidation. New RCV_NXT=" << rcv_nxt.get());
             }
         }
     };
@@ -519,40 +512,37 @@ namespace reliable_ordered_channel
             uint32_t current_una = snd_una.get();
             uint32_t total_capacity = buffer.capacity();
 
-            // Safe way to calculate buffered data in a circular buffer
             uint32_t buffered = (current_write - current_una);
-            uint32_t available = (total_capacity - 1) - buffered; // -1 to avoid head == tail ambiguity
+            uint32_t available = (total_capacity - 1) - buffered; 
 
             if (available < len)
             {
-                logger::getInstance().logWarning(std::string("[send_window::write_data] Application write failed: Not enough buffer space. Requested ") + std::to_string(len) + ", Available " + std::to_string(available));
+                LOG_WARN("[send_window::write_data] Application write failed: Not enough buffer space. Requested " << len << ", Available " << available);
                 return -1;
             }
 
             buffer.write_at_position(current_write, data, len);
             write_pos.advance(len);
-            logger::getInstance().logInfo("Application wrote " + std::to_string(len) + " bytes. New WRITE_POS=" + std::to_string(write_pos.get()));
+            LOG_INFO("Application wrote " << len << " bytes. New WRITE_POS=" << write_pos.get());
 
             return static_cast<ssize_t>(len);
         }
 
         uint32_t get_packet_to_send(char *out_buf, uint32_t max_payload, uint32_t &out_seq_no)
         {
-            // 1. Check for retransmission (highest priority)
             inflight_segment seg;
             if (retransmissions.get_retransmit_segment(seg))
             {
                 buffer.read_from_position(seg.seq_no, out_buf, seg.length);
                 out_seq_no = seg.seq_no;
-                logger::getInstance().logTest("Retransmission data loaded: Seq=" + std::to_string(out_seq_no) + ", Len=" + std::to_string(seg.length));
+                LOG_TEST("Retransmission data loaded: Seq=" << out_seq_no << ", Len=" << seg.length);
                 return seg.length;
             }
 
-            // 2. Send new data
             uint32_t current_nxt = snd_nxt.get();
             uint32_t current_write = write_pos.get();
             uint32_t current_una = snd_una.get();
-            uint32_t available_to_send = current_write - current_nxt; // Bytes written but not yet sent
+            uint32_t available_to_send = current_write - current_nxt; 
             uint32_t in_flight = current_nxt - current_una;
             uint16_t remote_win = flow.get_remote_window();
 
@@ -561,7 +551,7 @@ namespace reliable_ordered_channel
 
             if (!flow.can_send_bytes(in_flight))
             {
-                logger::getInstance().logTest("Cannot send new data: Remote window is full. InFlight=" + std::to_string(in_flight) + ", RemoteWin=" + std::to_string(remote_win));
+                LOG_TEST("Cannot send new data: Remote window is full. InFlight=" << in_flight << ", RemoteWin=" << remote_win);
                 return 0;
             }
 
@@ -573,7 +563,7 @@ namespace reliable_ordered_channel
 
             if (can_send == 0)
             {
-                logger::getInstance().logTest("Cannot send new data: Effective send size is 0. AvailToWrite=" + std::to_string(available_to_send) + ", WindowAvail=" + std::to_string(window_available));
+                LOG_TEST("Cannot send new data: Effective send size is 0. AvailToWrite=" << available_to_send << ", WindowAvail=" << window_available);
                 return 0;
             }
 
@@ -581,7 +571,7 @@ namespace reliable_ordered_channel
             retransmissions.add_segment(current_nxt, can_send);
             out_seq_no = current_nxt;
             snd_nxt.advance(can_send);
-            logger::getInstance().logInfo("Sending new data: Seq=" + std::to_string(out_seq_no) + ", Len=" + std::to_string(can_send) + ". New SND_NXT=" + std::to_string(snd_nxt.get()));
+            LOG_INFO("Sending new data: Seq=" << out_seq_no << ", Len=" << can_send << ". New SND_NXT=" << snd_nxt.get());
 
             return can_send;
         }
@@ -591,17 +581,17 @@ namespace reliable_ordered_channel
             uint32_t current_una = snd_una.get();
             if (ack_no > current_una)
             {
-                logger::getInstance().logInfo("Processing ACK: " + std::to_string(ack_no) + ". Current SND_UNA: " + std::to_string(current_una));
+                LOG_INFO("Processing ACK: " << ack_no << ". Current SND_UNA: " << current_una);
                 snd_una.set(ack_no);
                 retransmissions.acknowledge_up_to(ack_no);
             }
             else if (ack_no < current_una)
             {
-                logger::getInstance().logWarning("Received old ACK: " + std::to_string(ack_no) + ". Current SND_UNA: " + std::to_string(current_una));
+                LOG_WARN("Received old ACK: " << ack_no << ". Current SND_UNA: " << current_una);
             }
             else
             {
-                logger::getInstance().logTest("Received duplicate ACK: " + std::to_string(ack_no));
+                LOG_TEST("Received duplicate ACK: " << ack_no);
             }
         }
 
@@ -651,24 +641,22 @@ namespace reliable_ordered_channel
         send_window snd_window;
         receive_window rcv_window;
         flag_manager flags;
-        mutable std::mutex mutex_; // protects channel-wide state and callback pointers
+        mutable std::mutex mutex_; 
         std::function<void()> on_app_data_ready;
         std::function<void(std::unique_ptr<rudp_protocol_packet>)> on_net_data_ready;
 
         std::shared_ptr<timer_manager> global_timer_manager;
 
-        // === Timer Configuration ===
-        static constexpr uint64_t KEEPALIVE_INTERVAL_MS = 30000; // 30 seconds
-        static constexpr uint64_t DELAYED_ACK_MS = 40;           // 40ms delayed ACK
+        static constexpr uint64_t KEEPALIVE_INTERVAL_MS = 30000; 
+        static constexpr uint64_t DELAYED_ACK_MS = 40;           
 
-        // === Timer Handlers ===
         void on_rto_expire()
         {
             std::function<void(std::unique_ptr<rudp_protocol_packet>)> cb;
             std::unique_ptr<rudp_protocol_packet> pkt;
             {
                 std::lock_guard<std::mutex> guard(mutex_);
-                logger::getInstance().logWarning("RTO timer expired. Triggering retransmission check.");
+                LOG_WARN("RTO timer expired. Triggering retransmission check.");
                 pkt = on_transport_send_nolock();
                 cb = on_net_data_ready;
             }
@@ -683,11 +671,11 @@ namespace reliable_ordered_channel
             bool ack_pending = false;
             {
                 std::lock_guard<std::mutex> guard(mutex_);
-                logger::getInstance().logTest("Delayed ACK timer expired. Checking for pending ACK.");
+                LOG_TEST("Delayed ACK timer expired. Checking for pending ACK.");
                 ack_pending = rcv_window.is_ack_pending();
                 if (ack_pending)
                 {
-                    logger::getInstance().logInfo("Delayed ACK pending. Sending ACK packet.");
+                    LOG_INFO("Delayed ACK pending. Sending ACK packet.");
                     pkt = on_transport_send_nolock();
                     cb = on_net_data_ready;
                 }
@@ -695,10 +683,9 @@ namespace reliable_ordered_channel
             if (ack_pending && pkt && cb)
                 cb(std::move(pkt));
             else if (!ack_pending)
-                logger::getInstance().logTest("Delayed ACK not pending. No packet sent.");
+                LOG_TEST("Delayed ACK not pending. No packet sent.");
         }
 
-        // === Timer Scheduling ===
         void schedule_rto_timer()
         {
             std::shared_ptr<timer_manager> timer_mgr;
@@ -708,7 +695,7 @@ namespace reliable_ordered_channel
             }
             if (!timer_mgr)
             {
-                logger::getInstance().logError("RTO Timer not scheduled: Timer Manager not set.");
+                LOG_ERROR("RTO Timer not scheduled: Timer Manager not set.");
                 return;
             }
 
@@ -718,14 +705,14 @@ namespace reliable_ordered_channel
                 auto self = self_weak.lock();
                 if (!self)
                 {
-                    logger::getInstance().logInfo("RTO timer expired but channel already destroyed");
+                    LOG_INFO("RTO timer expired but channel already destroyed");
                     return;
                 }
                 self->on_rto_expire();
             };
             auto timer = std::make_unique<timer_info>(duration_ms(channel_config::RTO_MS), cb);
             timer_mgr->add_timer(std::move(timer));
-            logger::getInstance().logTest("RTO timer scheduled for " + std::to_string(channel_config::RTO_MS) + "ms.");
+            LOG_TEST("RTO timer scheduled for " << channel_config::RTO_MS << "ms.");
         }
 
         void schedule_delayed_ack_timer()
@@ -737,7 +724,7 @@ namespace reliable_ordered_channel
             }
             if (!timer_mgr)
             {
-                logger::getInstance().logError("Delayed ACK Timer not scheduled: Timer Manager not set.");
+                LOG_ERROR("Delayed ACK Timer not scheduled: Timer Manager not set.");
                 return;
             }
 
@@ -747,14 +734,14 @@ namespace reliable_ordered_channel
                 auto self = self_weak.lock();
                 if (!self)
                 {
-                    logger::getInstance().logInfo("Delayed ACK timer expired but channel already destroyed");
+                    LOG_INFO("Delayed ACK timer expired but channel already destroyed");
                     return;
                 }
                 self->on_delayed_ack_expire();
             };
             auto timer = std::make_unique<timer_info>(duration_ms(DELAYED_ACK_MS), cb);
             timer_mgr->add_timer(std::move(timer));
-            logger::getInstance().logTest("Delayed ACK timer scheduled for " + std::to_string(DELAYED_ACK_MS) + "ms.");
+            LOG_TEST("Delayed ACK timer scheduled for " << DELAYED_ACK_MS << "ms.");
         }
 
         std::unique_ptr<rudp_protocol_packet> on_transport_send_nolock()
@@ -769,7 +756,7 @@ namespace reliable_ordered_channel
 
             if (payload_len == 0 && !send_ack && !send_window)
             {
-                logger::getInstance().logTest("on_transport_send: No data to send, no ACK/Window update needed. Returning nullptr.");
+                LOG_TEST("on_transport_send: No data to send, no ACK/Window update needed. Returning nullptr.");
                 return nullptr;
             }
 
@@ -803,16 +790,12 @@ namespace reliable_ordered_channel
 
             rcv_window.clear_ack_pending();
 
-            std::string log_msg = "Sending packet: Seq=" + std::to_string(seq_no) +
-                                  ", Ack=" + std::to_string(header.ack_no) +
-                                  ", Win=" + std::to_string(header.win_sz);
-            if (payload_len > 0)
-                log_msg += ", Payload=" + std::to_string(payload_len) + " bytes (Data)";
-            if (send_ack)
-                log_msg += " (ACK)";
-            if (send_window)
-                log_msg += " (WIND_SZ)";
-            logger::getInstance().logInfo(log_msg);
+            LOG_INFO("Sending packet: Seq=" << seq_no <<
+                     ", Ack=" << header.ack_no <<
+                     ", Win=" << header.win_sz <<
+                     (payload_len > 0 ? ", Payload=" + std::to_string(payload_len) + " bytes (Data)" : "") <<
+                     (send_ack ? " (ACK)" : "") <<
+                     (send_window ? " (WIND_SZ)" : ""));
 
             return packet;
         }
@@ -820,12 +803,12 @@ namespace reliable_ordered_channel
     public:
         explicit reliable_ordered_channel(channel_id id) : ch_id(id)
         {
-            logger::getInstance().logInfo("Reliable Ordered Channel " + std::to_string(ch_id) + " created.");
+            LOG_INFO("Reliable Ordered Channel " << ch_id << " created.");
         }
 
         std::unique_ptr<i_channel> clone() const override
         {
-            logger::getInstance().logError("Cloning Reliable Ordered Channel not supported.");
+            LOG_ERROR("Cloning Reliable Ordered Channel not supported.");
             return nullptr;
         }
 
@@ -856,7 +839,7 @@ namespace reliable_ordered_channel
                 channel_header header{};
                 if (!rcv_window.receive_packet(ibuf, sz, header))
                 {
-                    logger::getInstance().logWarning("Failed to process received packet in receive window. Dropped.");
+                    LOG_WARN("Failed to process received packet in receive window. Dropped.");
                     return;
                 }
 
@@ -870,12 +853,11 @@ namespace reliable_ordered_channel
 
                 if (payload_len > 0)
                 {
-                    logger::getInstance().logInfo("Received data payload (" + std::to_string(payload_len) + " bytes). Notifying application.");
+                    LOG_INFO("Received data payload (" << payload_len << " bytes). Notifying application.");
                     notify_app = true;
                     app_cb = on_app_data_ready;
                 }
 
-                // Schedule delayed ACK on data receipt
                 if (rcv_window.is_ack_pending())
                 {
                     if (payload_len > 0)
@@ -896,7 +878,7 @@ namespace reliable_ordered_channel
                 schedule_delayed_ack_timer();
             if (send_immediate_ack && pkt_to_send && net_cb)
             {
-                logger::getInstance().logTest("Received ACK-only packet, sending response immediately.");
+                LOG_TEST("Received ACK-only packet, sending response immediately.");
                 net_cb(std::move(pkt_to_send));
             }
         }
@@ -927,14 +909,14 @@ namespace reliable_ordered_channel
                 written = snd_window.write_data(buf, len);
                 if (written > 0)
                 {
-                    logger::getInstance().logInfo(std::string("[reliable_ordered_channel::write_bytes_from_application] Application wrote ") + std::to_string(written) + " bytes. Attempting to send immediately.");
+                    LOG_INFO("[reliable_ordered_channel::write_bytes_from_application] Application wrote " << written << " bytes. Attempting to send immediately.");
                     pkt = on_transport_send_nolock();
                     net_cb = on_net_data_ready;
                     should_schedule_rto = true;
                 }
                 else
                 {
-                    logger::getInstance().logWarning("[reliable_ordered_channel::write_bytes_from_application] Application write failed (buffer full).");
+                    LOG_WARN("[reliable_ordered_channel::write_bytes_from_application] Application write failed (buffer full).");
                 }
             }
             if (pkt && net_cb)
@@ -950,21 +932,21 @@ namespace reliable_ordered_channel
         {
             std::lock_guard<std::mutex> guard(mutex_);
             on_app_data_ready = f;
-            logger::getInstance().logTest("on_app_data_ready callback set.");
+            LOG_TEST("on_app_data_ready callback set.");
         }
 
         void set_on_net_data_ready(std::function<void(std::unique_ptr<rudp_protocol_packet>)> f) override
         {
             std::lock_guard<std::mutex> guard(mutex_);
             on_net_data_ready = f;
-            logger::getInstance().logTest("on_net_data_ready callback set.");
+            LOG_TEST("on_net_data_ready callback set.");
         }
 
         void set_timer_manager(std::shared_ptr<timer_manager> timer_man) override
         {
             std::lock_guard<std::mutex> guard(mutex_);
             global_timer_manager = timer_man;
-            logger::getInstance().logInfo("Timer manager set. Scheduling initial timers.");
+            LOG_INFO("Timer manager set. Scheduling initial timers.");
         }
     };
 }

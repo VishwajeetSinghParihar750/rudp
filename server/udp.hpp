@@ -37,21 +37,21 @@ class udp : public i_udp_for_session_control
         int flags = fcntl(fd, F_GETFL, 0);
         if (flags == -1)
         {
-            logger::getInstance().logError("[set_non_blocking] fcntl(F_GETFL) failed: " + std::string(strerror(errno)));
+            LOG_ERROR("[set_non_blocking] fcntl(F_GETFL) failed: " << strerror(errno));
             assert(false);
         }
         flags |= O_NONBLOCK;
         if (fcntl(fd, F_SETFL, flags) == -1)
         {
-            logger::getInstance().logError("[set_non_blocking] fcntl(F_SETFL, O_NONBLOCK) failed: " + std::string(strerror(errno)));
+            LOG_ERROR("[set_non_blocking] fcntl(F_SETFL, O_NONBLOCK) failed: " << strerror(errno));
             assert(false);
         }
-        logger::getInstance().logInfo("[set_non_blocking] Socket " + std::to_string(fd) + " set to non-blocking.");
+        LOG_INFO("[set_non_blocking] Socket " << fd << " set to non-blocking.");
     }
 
     void initialize_socket(const char *PORT)
     {
-        logger::getInstance().logInfo("[initialize_socket] Initializing UDP socket on port " + std::string(PORT));
+        LOG_INFO("[initialize_socket] Initializing UDP socket on port " << PORT);
         addrinfo hints{};
         addrinfo *results = nullptr;
 
@@ -62,7 +62,7 @@ class udp : public i_udp_for_session_control
         int res = getaddrinfo(NULL, PORT, &hints, &results);
         if (res != 0)
         {
-            logger::getInstance().logCritical("[initialize_socket] getaddrinfo failed: " + std::string(gai_strerror(res)));
+            LOG_CRITICAL("[initialize_socket] getaddrinfo failed: " << gai_strerror(res));
             assert(false);
         }
 
@@ -71,7 +71,7 @@ class udp : public i_udp_for_session_control
             socket_fd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
             if (socket_fd == -1)
             {
-                logger::getInstance().logWarning("[initialize_socket] Failed to create socket: " + std::string(strerror(errno)));
+                LOG_WARN("[initialize_socket] Failed to create socket: " << strerror(errno));
                 continue;
             }
 
@@ -81,7 +81,7 @@ class udp : public i_udp_for_session_control
             int sopres = setsockopt(socket_fd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
             if (sopres == -1)
             {
-                logger::getInstance().logError("[initialize_socket] setsockopt(SO_REUSEADDR) failed: " + std::string(strerror(errno)));
+                LOG_ERROR("[initialize_socket] setsockopt(SO_REUSEADDR) failed: " << strerror(errno));
                 close(socket_fd);
                 socket_fd = -1;
                 continue;
@@ -91,11 +91,11 @@ class udp : public i_udp_for_session_control
 
             if (res_ == 0)
             {
-                logger::getInstance().logInfo("[initialize_socket] Successfully bound socket.");
+                LOG_INFO("[initialize_socket] Successfully bound socket.");
                 break;
             }
 
-            logger::getInstance().logWarning("[initialize_socket] Failed to bind socket: " + std::string(strerror(errno)));
+            LOG_WARN("[initialize_socket] Failed to bind socket: " << strerror(errno));
             close(socket_fd);
             socket_fd = -1;
         }
@@ -104,21 +104,21 @@ class udp : public i_udp_for_session_control
 
         if (socket_fd == -1)
         {
-            logger::getInstance().logCritical("[initialize_socket] Failed to initialize UDP socket.");
+            LOG_CRITICAL("[initialize_socket] Failed to initialize UDP socket.");
         }
         assert(socket_fd != -1);
     }
 
     void setup_epoll()
     {
-        logger::getInstance().logInfo("[setup_epoll] Setting up epoll.");
+        LOG_INFO("[setup_epoll] Setting up epoll.");
         epoll_event event;
 
         epoll_fd = epoll_create1(0);
 
         if (epoll_fd == -1)
         {
-            logger::getInstance().logCritical("[setup_epoll] epoll_create1 failed: " + std::string(strerror(errno)));
+            LOG_CRITICAL("[setup_epoll] epoll_create1 failed: " << strerror(errno));
         }
         assert(epoll_fd != -1);
 
@@ -129,15 +129,15 @@ class udp : public i_udp_for_session_control
 
         if (epoll_ctl_rv == -1)
         {
-            logger::getInstance().logCritical("[setup_epoll] epoll_ctl failed to add socket_fd: " + std::string(strerror(errno)));
+            LOG_CRITICAL("[setup_epoll] epoll_ctl failed to add socket_fd: " << strerror(errno));
         }
         assert(epoll_ctl_rv == 0);
-        logger::getInstance().logInfo("[setup_epoll] UDP socket added to epoll instance.");
+        LOG_INFO("[setup_epoll] UDP socket added to epoll instance.");
     }
 
     void event_loop(std::stop_token token)
     {
-        logger::getInstance().logInfo("[event_loop] UDP I/O thread started.");
+        LOG_INFO("[event_loop] UDP I/O thread started.");
         print_listener_info();
 
         constexpr int MAX_EVENTS = 2048;
@@ -156,7 +156,7 @@ class udp : public i_udp_for_session_control
             {
                 if (errno != EINTR)
                 {
-                    logger::getInstance().logError("[event_loop] epoll_wait error: " + std::string(strerror(errno)));
+                    LOG_ERROR("[event_loop] epoll_wait error: " << strerror(errno));
                 }
                 continue;
             }
@@ -170,13 +170,13 @@ class udp : public i_udp_for_session_control
 
                     if (ioctl(socket_fd, FIONREAD, &bytes_avail) == -1)
                     {
-                        logger::getInstance().logError("[event_loop] ioctl(FIONREAD) failed: " + std::string(strerror(errno)));
+                        LOG_ERROR("[event_loop] ioctl(FIONREAD) failed: " << strerror(errno));
                         continue;
                     }
 
                     if (bytes_avail == 0)
                     {
-                        logger::getInstance().logWarning("[event_loop] Received EPOLLIN but FIONREAD reported 0 bytes available.");
+                        LOG_WARN("[event_loop] Received EPOLLIN but FIONREAD reported 0 bytes available.");
                         continue;
                     }
 
@@ -191,33 +191,33 @@ class udp : public i_udp_for_session_control
                         session_control_sp = session_control_.lock();
                         if (session_control_sp != nullptr)
                         {
-                            logger::getInstance().logTest("[event_loop] Received " + std::to_string(n) + " bytes from " + addr->to_string() + ". Forwarding to Session Control.");
+                            LOG_TEST("[event_loop] Received " << n << " bytes from " << addr->to_string() << ". Forwarding to Session Control.");
                             session_control_sp->on_transport_receive(std::move(pkt), std::move(addr));
                         }
                         else
                         {
-                            logger::getInstance().logWarning("[event_loop] Received packet, but Session Control weak pointer expired.");
+                            LOG_WARN("[event_loop] Received packet, but Session Control weak pointer expired.");
                         }
                     }
                     else if (n == -1)
                     {
                         if (errno != EAGAIN && errno != EWOULDBLOCK)
                         {
-                            logger::getInstance().logError("[event_loop] recvfrom failed: " + std::string(strerror(errno)));
+                            LOG_ERROR("[event_loop] recvfrom failed: " << strerror(errno));
                         }
                         else
                         {
-                            logger::getInstance().logTest("[event_loop] recvfrom returned EAGAIN/EWOULDBLOCK (expected for non-blocking).");
+                            LOG_TEST("[event_loop] recvfrom returned EAGAIN/EWOULDBLOCK (expected for non-blocking).");
                         }
                     }
                 }
                 else
                 {
-                    logger::getInstance().logError("[event_loop] Epoll event on unexpected fd/event: fd=" + std::to_string(current_fd) + ", events=" + std::to_string(events[ind].events));
+                    LOG_ERROR("[event_loop] Epoll event on unexpected fd/event: fd=" << current_fd << ", events=" << events[ind].events);
                 }
             }
         }
-        logger::getInstance().logInfo("[event_loop] UDP I/O thread stopping.");
+        LOG_INFO("[event_loop] UDP I/O thread stopping.");
     }
 
     void print_listener_info()
@@ -236,7 +236,7 @@ class udp : public i_udp_for_session_control
 
         if (gs_res != 0)
         {
-            logger::getInstance().logError("[print_listener_info] getsockname failed: " + std::string(strerror(errno)));
+            LOG_ERROR("[print_listener_info] getsockname failed: " << strerror(errno));
         }
         assert(gs_res == 0);
 
@@ -248,20 +248,18 @@ class udp : public i_udp_for_session_control
 
         if (gn_res == 0)
         {
-            std::string log_msg = "UDP Listener started on ";
             if (local_addr_storage.ss_family == AF_INET6)
             {
-                log_msg += "[" + std::string(host_str) + "]:" + std::string(port_str) + " (IPv6)";
+                LOG_CRITICAL("UDP Listener started on [" << host_str << "]:" << port_str << " (IPv6)");
             }
             else
             {
-                log_msg += std::string(host_str) + ":" + std::string(port_str) + " (IPv4)";
+                LOG_CRITICAL("UDP Listener started on " << host_str << ":" << port_str << " (IPv4)");
             }
-            logger::getInstance().logCritical(log_msg);
         }
         else
         {
-            logger::getInstance().logWarning("Could not resolve socket name for printing: " + std::string(gai_strerror(gn_res)));
+            LOG_WARN("Could not resolve socket name for printing: " << gai_strerror(gn_res));
         }
     }
 
@@ -284,17 +282,17 @@ public:
 
     ~udp()
     {
-        logger::getInstance().logCritical("UDP destructor called. Closing socket and epoll fd.");
+        LOG_CRITICAL("UDP destructor called. Closing socket and epoll fd.");
 
         if (socket_fd != -1)
         {
             close(socket_fd);
-            logger::getInstance().logInfo("Socket " + std::to_string(socket_fd) + " closed.");
+            LOG_INFO("Socket " << socket_fd << " closed.");
         }
         if (epoll_fd != -1)
         {
             close(epoll_fd);
-            logger::getInstance().logInfo("Epoll FD " + std::to_string(epoll_fd) + " closed.");
+            LOG_INFO("Epoll FD " << epoll_fd << " closed.");
         }
     }
 
@@ -310,12 +308,12 @@ public:
         {
             if (errno != EAGAIN && errno != EWOULDBLOCK)
             {
-                logger::getInstance().logError("sendto failed to " + addr.to_string() + ": " + std::string(strerror(errno)));
+                LOG_ERROR("sendto failed to " << addr.to_string() << ": " << strerror(errno));
             }
         }
         else
         {
-            logger::getInstance().logTest("Sent " + std::to_string(sent_bytes) + " bytes to " + addr.to_string());
+            LOG_TEST("Sent " << sent_bytes << " bytes to " << addr.to_string());
         }
 
         return sent_bytes;
@@ -324,6 +322,6 @@ public:
     void set_sesion_control(std::weak_ptr<i_session_control_for_udp> cm, server_setup_access_key)
     {
         session_control_ = cm;
-        logger::getInstance().logInfo("Session Control weak pointer set.");
+        LOG_INFO("Session Control weak pointer set.");
     }
 };

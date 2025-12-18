@@ -5,131 +5,154 @@
 #include <vector>
 #include <atomic>
 #include <cstring>
-#include <random>
+#include <algorithm>
+#include <iomanip>
+#include <mutex>
 
-// Structure to make sequence handling easier
-struct PayloadHeader
+// --- CONFIGURATION ---
+const int TEST_DURATION_SEC = 30;
+const int PACKET_SIZE = 1024; // 1KB Payload
+const int TARGET_MBPS = 100;  // Target sending speed (optional throttling)
+
+struct Payload
 {
     uint32_t seq;
+    long long timestamp_ns; // Nanoseconds
+    char junk[PACKET_SIZE];
 };
+
+// --- STATS CONTAINER ---
+struct Stats
+{
+    std::atomic<size_t> sent_packets{0};
+    std::atomic<size_t> recv_packets{0};
+    std::atomic<size_t> bytes_recv{0};
+    std::vector<long long> latencies; // Stores RTT in microseconds
+    std::mutex lat_mtx;
+} stats;
+
+std::atomic<bool> running{true};
+
+void receiver_thread(std::shared_ptr<i_client> client)
+{
+    char buf[65535];
+    channel_id ch;
+
+    while (running)
+    {
+        ssize_t n = client->read_from_channel_blocking(ch, buf, sizeof(buf));
+        if (n >= (ssize_t)sizeof(uint32_t) + sizeof(long long))
+        {
+            Payload *p = (Payload *)buf;
+
+            // Calc Latency
+            auto now = std::chrono::steady_clock::now();
+            long long sent_time = p->timestamp_ns;
+            long long now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
+            long long rtt_us = (now_ns - sent_time) / 1000;
+
+            stats.recv_packets++;
+            stats.bytes_recv += n;
+
+            // Sample latency (don't lock for every single packet to avoid slowdown)
+            if (stats.recv_packets % 10 == 0)
+            {
+                std::lock_guard<std::mutex> lock(stats.lat_mtx);
+                stats.latencies.push_back(rtt_us);
+            }
+        }
+    }
+}
+
+void sender_thread(std::shared_ptr<i_client> client)
+{
+    uint32_t seq = 0;
+    std::vector<char> raw_buf(sizeof(Payload));
+    Payload *p = (Payload *)raw_buf.data();
+
+    // Fill junk once
+    memset(p->junk, 'X', PACKET_SIZE);
+
+    while (running)
+    {
+        p->seq = ++seq;
+        auto now = std::chrono::steady_clock::now();
+        p->timestamp_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
+
+        // Send on Reliable Channel
+        client->write_to_channel(1, raw_buf.data(), raw_buf.size());
+        std::this_thread::sleep_for(std::chrono::microseconds(50)); // Add this!
+        stats.sent_packets++;
+
+        // Optional: Simple Throttle to prevent local buffer overflow if sender > 10Gbps
+        // std::this_thread::sleep_for(std::chrono::microseconds(10));
+    }
+}
 
 int main()
 {
-    std::cout << "=== UNRELIABLE ORDERED CHANNEL TEST (ID: 2) ===" << std::endl;
+    std::cout << "=== RUDP ULTIMATE STRESS TEST ===" << std::endl;
+    auto client = create_client("127.0.0.1", "3003");
+    client->add_channel(1, channel_type::RELIABLE_ORDERED_CHANNEL);
 
-    try
+    // Start Threads
+    std::thread r_thread(receiver_thread, client);
+    std::thread s_thread(sender_thread, client);
+
+    std::cout << "Running test for " << TEST_DURATION_SEC << " seconds..." << std::endl;
+
+    // Live Progress
+    for (int i = 0; i < TEST_DURATION_SEC; i++)
     {
-        auto client = create_client("127.0.0.1", "3003");
-        client->add_channel(3, channel_type::UNORDERED_UNRELIABLE_CHANNEL);
-
-        uint32_t next_to_send = 1;
-        uint32_t last_received_seq = 0;
-
-        const int buflen = 65535;
-        char buf[buflen];
-
-        int total_sent_packets = 0;
-        int total_received_packets = 0;
-
-        // --- PHASE 1: SENDING BURSTS (10,000 packets) ---
-        std::cout << "[Phase 1] Sending 10,000 packets with sequence numbers..." << std::endl;
-
-        for (int i = 0; i < 100000; i++)
-        {
-            // Prepare payload: Header (Seq) + Random Data
-            PayloadHeader header;
-            header.seq = next_to_send++;
-
-            int data_len = (rand() % 100) + 1;
-            int total_packet_len = sizeof(PayloadHeader) + data_len;
-
-            std::vector<char> send_buf(total_packet_len);
-            std::memcpy(send_buf.data(), &header, sizeof(PayloadHeader));
-            // Fill rest with dummy data
-            std::memset(send_buf.data() + sizeof(PayloadHeader), 'A', data_len);
-
-            int cursent = client->write_to_channel(3, send_buf.data(), total_packet_len);
-            if (cursent > 0)
-                total_sent_packets++;
-
-            // Non-blocking read attempt
-            channel_id recv_ch;
-            ssize_t curread = client->read_from_channel_nonblocking(recv_ch, buf, buflen);
-
-            if (curread >= (ssize_t)sizeof(PayloadHeader))
-            {
-                PayloadHeader *recv_header = (PayloadHeader *)buf;
-
-                // VERIFICATION LOGIC
-                // if (recv_header->seq <= last_received_seq)
-                // {
-                //     std::cerr << "\nERROR: Ordering Violation!"
-                //               << " Received Seq: " << recv_header->seq
-                //               << " but Last Seq was: " << last_received_seq << std::endl;
-                //     exit(1);
-                // }
-
-                last_received_seq = recv_header->seq;
-                total_received_packets++;
-                std::cout << last_received_seq << std::endl;
-            }
-
-            // High-speed send, but tiny sleep to allow OS to breath
-            if (i % 100 == 0)
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
-
-        // --- PHASE 2: 20-SECOND DRAIN & VERIFY ---
-        std::cout << "\n[Phase 2] Sent " << total_sent_packets << " packets." << std::endl;
-        std::cout << "Draining for 20 seconds to catch remaining echos..." << std::endl;
-
-        auto start_time = std::chrono::steady_clock::now();
-        while (true)
-        {
-            auto now = std::chrono::steady_clock::now();
-            if (std::chrono::duration_cast<std::chrono::seconds>(now - start_time).count() >= 20)
-            {
-                break;
-            }
-
-            channel_id recv_ch;
-            // Using blocking read with a short timeout or just regular blocking
-            ssize_t curread = client->read_from_channel_nonblocking(recv_ch, buf, buflen);
-
-            if (curread >= (ssize_t)sizeof(PayloadHeader))
-            {
-                PayloadHeader *recv_header = (PayloadHeader *)buf;
-
-                if (recv_header->seq <= last_received_seq)
-                {
-                    std::cerr << "\nERROR: Ordering Violation during drain!"
-                              << " Received Seq: " << recv_header->seq
-                              << " <= Last Seq: " << last_received_seq << std::endl;
-                    exit(1);
-                }
-
-                last_received_seq = recv_header->seq;
-                total_received_packets++;
-
-                std::cout << "\r[Status] Last Received Seq: " << last_received_seq
-                          << " | Total Recv: " << total_received_packets << "   " << std::flush;
-            }
-        }
-
-        // --- SUMMARY ---
-        std::cout << "\n\n=== TEST COMPLETE ===" << std::endl;
-        std::cout << "Packets Sent:     " << total_sent_packets << std::endl;
-        std::cout << "Packets Received: " << total_received_packets << std::endl;
-        std::cout << "Packet Loss:      " << (1.0f - (float)total_received_packets / total_sent_packets) * 100.0f << "%" << std::endl;
-        std::cout << "Max Seq Received: " << last_received_seq << std::endl;
-        std::cout << "Result: SUCCESS (No ordering violations detected)" << std::endl;
-
-        client->close_client();
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+        std::cout << "\r[Running] Sent: " << stats.sent_packets << " | Recv: " << stats.recv_packets << std::flush;
     }
-    catch (const std::exception &e)
+
+    running = false;
+    // Force detach or close to stop blocking reads
+    client->close_client();
+    if (r_thread.joinable())
+        r_thread.join();
+    if (s_thread.joinable())
+        s_thread.join();
+
+    // --- FINAL REPORT ---
+    std::cout << "\n\n=== PERFORMANCE REPORT ===" << std::endl;
+    std::cout << "Total Sent:     " << stats.sent_packets << std::endl;
+    std::cout << "Total Recv:     " << stats.recv_packets << std::endl;
+
+    double loss = 100.0 * (1.0 - ((double)stats.recv_packets / (double)stats.sent_packets));
+    std::cout << "Packet Loss:    " << std::fixed << std::setprecision(2) << loss << "%" << std::endl;
+
+    double total_mb = (double)stats.bytes_recv / (1024 * 1024);
+    double throughput = total_mb / TEST_DURATION_SEC;
+    std::cout << "Avg Throughput: " << throughput << " MiB/s" << std::endl;
+
+    // Latency Calcs
+    std::vector<long long> lats;
     {
-        std::cerr << "Exception: " << e.what() << std::endl;
-        return 1;
+        std::lock_guard<std::mutex> lock(stats.lat_mtx);
+        lats = stats.latencies;
+    }
+
+    if (!lats.empty())
+    {
+        std::sort(lats.begin(), lats.end());
+        long long avg = 0;
+        for (auto v : lats)
+            avg += v;
+        avg /= lats.size();
+
+        std::cout << "Latency (RTT):" << std::endl;
+        std::cout << "  Min: " << lats.front() << " us" << std::endl;
+        std::cout << "  Avg: " << avg << " us" << std::endl;
+        std::cout << "  p95: " << lats[(size_t)(lats.size() * 0.95)] << " us" << std::endl;
+        std::cout << "  p99: " << lats[(size_t)(lats.size() * 0.99)] << " us" << std::endl;
+        std::cout << "  Max: " << lats.back() << " us" << std::endl;
+    }
+    else
+    {
+        std::cout << "Latency: No packets received to calculate." << std::endl;
     }
 
     return 0;

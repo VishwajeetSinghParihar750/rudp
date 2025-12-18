@@ -1,115 +1,116 @@
-// test_server_verification.cpp
 #include "server/server_setup.hpp"
 #include <iostream>
 #include <thread>
-#include <chrono>
-#include <map>
+#include <vector>
 #include <atomic>
+#include <deque>
 #include <mutex>
+#include <condition_variable>
+#include <cstring>
+#include <iomanip>
 
-class ServerMonitor
+// --- HIGH PERFORMANCE ECHO SERVER ---
+
+struct Packet
 {
-private:
-    std::map<channel_id, std::map<client_id, size_t>> channel_client_stats;
-    std::mutex stats_mutex;
-    std::atomic<size_t> total_bytes_received{0};
-    std::atomic<size_t> total_messages_received{0};
+    channel_id ch;
+    client_id cl;
+    std::vector<char> data;
+};
+
+// A thread-safe queue for buffering echoes (Producer-Consumer)
+class PacketQueue
+{
+    std::deque<Packet> queue;
+    std::mutex mtx;
+    std::condition_variable cv;
 
 public:
-    void record_message(channel_id ch, client_id cl, size_t bytes)
+    void push(channel_id ch, client_id cl, const char *buf, size_t len)
     {
-        std::lock_guard<std::mutex> lock(stats_mutex);
-        channel_client_stats[ch][cl] += bytes;
-        total_bytes_received += bytes;
-        total_messages_received++;
+        {
+            std::lock_guard<std::mutex> lock(mtx);
+            // Optimization: Avoid vector re-allocation if possible
+            queue.push_back({ch, cl, std::vector<char>(buf, buf + len)});
+        }
+        cv.notify_one();
     }
 
-    void print_stats()
+    bool pop(Packet &p)
     {
-        std::lock_guard<std::mutex> lock(stats_mutex);
-
-        std::cout << "\n=== Server Statistics ===" << std::endl;
-        std::cout << "Total Messages: " << total_messages_received << std::endl;
-        std::cout << "Total Bytes: " << total_bytes_received << std::endl;
-        std::cout << "Active Channels: " << channel_client_stats.size() << std::endl;
-
-        for (const auto &[channel, clients] : channel_client_stats)
-        {
-            std::cout << "\nChannel " << channel << ":" << std::endl;
-            for (const auto &[client, bytes] : clients)
-            {
-                std::cout << "  Client " << client << ": " << bytes << " bytes" << std::endl;
-            }
-        }
+        std::unique_lock<std::mutex> lock(mtx);
+        cv.wait(lock, [this]
+                { return !queue.empty(); });
+        p = std::move(queue.front());
+        queue.pop_front();
+        return true;
     }
 };
 
+PacketQueue echo_queue;
+std::atomic<size_t> total_bytes{0};
+std::atomic<size_t> total_msgs{0};
+
+void echo_worker(std::shared_ptr<i_server> server)
+{
+    Packet p;
+    while (true)
+    {
+        if (echo_queue.pop(p))
+        {
+            // This is the bottleneck: Check how long this takes
+            server->write_to_channel(p.ch, p.cl, p.data.data(), p.data.size());
+        }
+    }
+}
+
 int main()
 {
-    std::cout << "=== Server Verification Test ===" << std::endl;
-
+    std::cout << "=== HIGH-PERFORMANCE ECHO SERVER ===" << std::endl;
     auto server = create_server("3003");
-    ServerMonitor monitor;
 
+    // Register Channels
     server->add_channel(1, channel_type::RELIABLE_ORDERED_CHANNEL);
     server->add_channel(2, channel_type::ORDERED_UNRELIABLE_CHANNEL);
     server->add_channel(3, channel_type::UNORDERED_UNRELIABLE_CHANNEL);
-    std::cout << "Registered 1000 channels" << std::endl;
 
-    std::atomic<bool> running{true};
+    // Start Echo Worker (Consumer)
+    std::thread worker(echo_worker, server);
+    worker.detach();
 
-    // Statistics thread
-    std::jthread stats_thread([&]()
-                              {
-        while (running) {
-            std::this_thread::sleep_for(std::chrono::seconds(5));
-            monitor.print_stats();
+    // Stats Printer
+    std::thread stats([]
+                      {
+        size_t last_bytes = 0;
+        while(true) {
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            size_t current = total_bytes.load();
+            size_t diff = current - last_bytes;
+            double mbs = (double)diff / (1024 * 1024);
+            std::cout << "[Server] Throughput: " << std::fixed << std::setprecision(2) << mbs << " MiB/s | Msgs: " << total_msgs.load() << std::endl;
+            last_bytes = current;
         } });
+    stats.detach();
 
-    // Main processing loop
-    try
+    // Main Reader Loop (Producer)
+    // Allocating buffer ONCE to save CPU
+    static char buffer[65535];
+    channel_id ch;
+    client_id cl;
+
+    std::cout << "Server Ready. Waiting for packets..." << std::endl;
+
+    while (true)
     {
-        while (true)
+        // Blocking read is fine because write happens in another thread!
+        ssize_t n = server->read_from_channel_blocking(ch, cl, buffer, sizeof(buffer));
+        if (n > 0)
         {
-            char buffer[65535];
-            channel_id ch_id;
-            client_id cl_id;
-
-            // Blocking read
-            ssize_t nread = server->read_from_channel_blocking(ch_id, cl_id, buffer, sizeof(buffer));
-
-            if (nread > 0)
-            {
-                // Record statistics
-                monitor.record_message(ch_id, cl_id, nread);
-
-                // Echo back (simple verification)
-                server->write_to_channel(ch_id, cl_id, buffer, nread);
-
-                // Log interesting patterns
-                // if (nread < 10)
-                // {
-                //     std::string msg(buffer, nread);
-                //     std::cout << "[DEBUG] Short message on ch" << ch_id << " from cl" << cl_id << ": " << msg << std::endl;
-                // }
-            }
-            else if (nread < 0)
-            {
-                std::cerr << "[ERROR] Read error: " << nread << std::endl;
-            }
+            echo_queue.push(ch, cl, buffer, n);
+            total_bytes += n;
+            total_msgs++;
         }
     }
-    catch (const std::exception &e)
-    {
-        std::cerr << "Server error: " << e.what() << std::endl;
-    }
 
-    running = false;
-    if (stats_thread.joinable())
-    {
-        stats_thread.join();
-    }
-
-    server->close_server();
     return 0;
 }

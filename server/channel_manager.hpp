@@ -84,7 +84,7 @@ class channel_manager : public i_server, public i_channel_manager_for_session_co
 
         if (pkt.get_length() < off + sz)
         {
-            logger::getInstance().logError("Serialize: Packet capacity too small for header.");
+            LOG_ERROR("Serialize: Packet capacity too small for header.");
         }
         assert(pkt.get_length() >= off + sz);
 
@@ -100,7 +100,7 @@ class channel_manager : public i_server, public i_channel_manager_for_session_co
 
         if (pkt.get_length() < off + sz)
         {
-            logger::getInstance().logError("Deserialize: Packet length smaller than expected header size.");
+            LOG_ERROR("Deserialize: Packet length smaller than expected header size.");
         }
         assert(pkt.get_length() >= off + sz);
 
@@ -115,11 +115,11 @@ class channel_manager : public i_server, public i_channel_manager_for_session_co
 
     std::shared_ptr<i_channel> create_new_channel_for_client(client_id cl_id, channel_id ch_id)
     {
-        logger::getInstance().logInfo("Creating new channel " + std::to_string(ch_id) + " for client " + std::to_string(cl_id));
+        LOG_INFO("Creating new channel " << ch_id << " for client " << cl_id);
 
         if (!channels.contains(ch_id))
         {
-            logger::getInstance().logError("Attempted to create channel with unknown ID: " + std::to_string(ch_id));
+            LOG_ERROR("Attempted to create channel with unknown ID: " << ch_id);
             return nullptr;
         }
 
@@ -142,7 +142,7 @@ class channel_manager : public i_server, public i_channel_manager_for_session_co
                         info.cl_id = cl_id;
                         info.time = std::chrono::steady_clock::now();
                         sp->ready_to_rcv_queue.push(std::move(info));
-                        logger::getInstance().logTest("RCV Ready: Data from ch " + std::to_string(ch_id) + " pushed to application queue.");
+                        LOG_TEST("RCV Ready: Data from ch " << ch_id << " pushed to application queue.");
                     }
                 });
 
@@ -175,7 +175,7 @@ class channel_manager : public i_server, public i_channel_manager_for_session_co
                         info.cl_id = cl_id;
                         info.time = std::chrono::steady_clock::now();
                         sp->ready_to_rcv_queue.push(std::move(info));
-                        logger::getInstance().logTest("RCV Ready: Data from ch " + std::to_string(ch_id) + " pushed to application queue.");
+                        LOG_TEST("RCV Ready: Data from ch " << ch_id << " pushed to application queue.");
                     }
                 });
 
@@ -208,7 +208,7 @@ class channel_manager : public i_server, public i_channel_manager_for_session_co
                         info.cl_id = cl_id;
                         info.time = std::chrono::steady_clock::now();
                         sp->ready_to_rcv_queue.push(std::move(info));
-                        logger::getInstance().logTest("RCV Ready: Data from ch " + std::to_string(ch_id) + " pushed to application queue.");
+                        LOG_TEST("RCV Ready: Data from ch " << ch_id << " pushed to application queue.");
                     }
                 });
 
@@ -226,14 +226,14 @@ class channel_manager : public i_server, public i_channel_manager_for_session_co
         }
 
         default:
-            logger::getInstance().logError("Unsupported channel type for channel ID: " + std::to_string(ch_id));
+            LOG_ERROR("Unsupported channel type for channel ID: " << ch_id);
             return nullptr;
         }
     }
 
     void on_transport_send(const client_id &cl_id, const channel_id &ch_id, std::unique_ptr<rudp_protocol_packet> pkt)
     {
-        logger::getInstance().logTest("Transport Send: Client " + std::to_string(cl_id) + ", Channel " + std::to_string(ch_id) + ", Length " + std::to_string(pkt->get_length()));
+        LOG_TEST("Transport Send: Client " << cl_id << ", Channel " << ch_id << ", Length " << pkt->get_length());
 
         serialize_channel_manager_header(*pkt, {ch_id});
         session_control_->on_transport_send_data(cl_id, std::move(pkt));
@@ -241,7 +241,7 @@ class channel_manager : public i_server, public i_channel_manager_for_session_co
 
     void perform_final_cleanup(client_id cl_id)
     {
-        logger::getInstance().logInfo("Final cleanup initiated for client " + std::to_string(cl_id));
+        LOG_INFO("Final cleanup initiated for client " << cl_id);
 
         per_client_channels.erase(cl_id);
         session_control_->notify_removal_of_client(cl_id);
@@ -263,42 +263,41 @@ public:
         // ℹ️add error handling to resopns back with error if wrong
         if (channels.size() >= MAX_CHANNELS)
         {
-            logger::getInstance().logError("Failed to add channel. MAX_CHANNELS limit reached: " + std::to_string(MAX_CHANNELS));
+            LOG_ERROR("Failed to add channel. MAX_CHANNELS limit reached: " << MAX_CHANNELS);
             return;
         }
 
         if (ch_id != INVALID_CHANNEL_ID && !channels.contains(ch_id))
         {
             channels.emplace(ch_id, type);
-            logger::getInstance().logInfo("Channel " + std::to_string(ch_id) + " of type " + std::to_string((int)type) + " added.");
+            LOG_INFO("Channel " << ch_id << " of type " << (int)type << " added.");
         }
         else if (ch_id == INVALID_CHANNEL_ID)
         {
-            logger::getInstance().logError("Attempted to add channel with INVALID_CHANNEL_ID.");
+            LOG_ERROR("Attempted to add channel with INVALID_CHANNEL_ID.");
         }
         else
         {
-            logger::getInstance().logError("Channel " + std::to_string(ch_id) + " already exists.");
+            LOG_ERROR("Channel " << ch_id << " already exists.");
         }
     }
 
     void close_server() override
     {
-        logger::getInstance().logInfo("Server close requested by application.");
+        LOG_INFO("Server close requested by application.");
         session_control_->on_close_server(); // now nothing should come to me from server, and if application tries to read or write after calling close, its undefined from my side
         // my things will get remvoed in destructor iteslf
     }
 
     ssize_t read_from_channel_nonblocking(channel_id &channel_id_, client_id &client_id_, char *buf, const size_t len) override
     {
-        logger::getInstance().logTest("Non-blocking read initiated.");
+        LOG_TEST("Non-blocking read initiated.");
 
         if (auto disconnected_client = pending_disconnects.try_pop())
         {
             client_id_ = *disconnected_client;
             channel_id_ = INVALID_CHANNEL_ID;
-            logger::getInstance().logInfo("Non-blocking read returning CLIENT_DISCONNECTED for client " +
-                                          std::to_string(client_id_));
+            LOG_INFO("Non-blocking read returning CLIENT_DISCONNECTED for client " << client_id_);
             return (ssize_t)READ_FROM_CHANNEL_ERROR::CLIENT_DISCONNECTED;
         }
 
@@ -306,10 +305,10 @@ public:
         bool result = ready_to_rcv_queue.pop(info);
         if (!result)
         {
-            logger::getInstance().logTest("Non-blocking read returning NO_PENDING_DATA.");
+            LOG_TEST("Non-blocking read returning NO_PENDING_DATA.");
             return (ssize_t)READ_FROM_CHANNEL_ERROR::NO_PENDING_DATA;
         }
-        logger::getInstance().logTest("Non-blocking read popped data for client " + std::to_string(info.cl_id) + " ch " + std::to_string(info.ch_id));
+        LOG_TEST("Non-blocking read popped data for client " << info.cl_id << " ch " << info.ch_id);
 
         client_id_ = info.cl_id;
         channel_id_ = info.ch_id;
@@ -317,33 +316,33 @@ public:
         auto client_map_opt = per_client_channels.get(client_id_);
         if (!client_map_opt)
         {
-            logger::getInstance().logError("Non-blocking read: Client map missing for client " + std::to_string(client_id_));
+            LOG_ERROR("Non-blocking read: Client map missing for client " << client_id_);
             return read_from_channel_nonblocking(channel_id_, client_id_, buf, len);
         }
 
         auto client_map = client_map_opt.value();
         if (!client_map->contains(channel_id_))
         {
-            logger::getInstance().logError("Non-blocking read: Channel map missing for ch " + std::to_string(channel_id_));
+            LOG_ERROR("Non-blocking read: Channel map missing for ch " << channel_id_);
             return read_from_channel_nonblocking(channel_id_, client_id_, buf, len);
         }
 
         auto ch_opt = client_map->get(channel_id_);
         if (!ch_opt)
         {
-            logger::getInstance().logError("Non-blocking read: Channel object missing for ch " + std::to_string(channel_id_));
+            LOG_ERROR("Non-blocking read: Channel object missing for ch " << channel_id_);
             return read_from_channel_nonblocking(channel_id_, client_id_, buf, len);
         }
 
         auto cur_channel = ch_opt.value();
         ssize_t bytes_read = cur_channel->read_bytes_to_application(buf, len);
-        logger::getInstance().logInfo("Non-blocking read successful: " + std::to_string(bytes_read) + " bytes from ch " + std::to_string(channel_id_));
+        LOG_INFO("Non-blocking read successful: " << bytes_read << " bytes from ch " << channel_id_);
         return bytes_read;
     }
 
     ssize_t read_from_channel_blocking(channel_id &channel_id_, client_id &client_id_, char *buf, const size_t len) override
     {
-        logger::getInstance().logTest("Blocking read initiated. Entering loop.");
+        LOG_TEST("Blocking read initiated. Entering loop.");
         rcv_ready_queue_info info;
 
         while (true)
@@ -352,8 +351,7 @@ public:
             {
                 client_id_ = *disconnected_client;
                 channel_id_ = INVALID_CHANNEL_ID;
-                logger::getInstance().logInfo("Non-blocking read returning CLIENT_DISCONNECTED for client " +
-                                              std::to_string(client_id_));
+                LOG_INFO("Non-blocking read returning CLIENT_DISCONNECTED for client " << client_id_);
                 return (ssize_t)READ_FROM_CHANNEL_ERROR::CLIENT_DISCONNECTED;
             }
 
@@ -364,7 +362,7 @@ public:
                 client_id_ = info.cl_id;
                 channel_id_ = info.ch_id;
 
-                logger::getInstance().logTest("Blocking read succeeded for client " + std::to_string(client_id_) + " ch " + std::to_string(channel_id_));
+                LOG_TEST("Blocking read succeeded for client " << client_id_ << " ch " << channel_id_);
 
                 auto client_map_opt = per_client_channels.get(client_id_);
                 if (client_map_opt)
@@ -377,24 +375,24 @@ public:
                         {
                             auto cur_channel = ch_opt.value();
                             ssize_t bytes_read = cur_channel->read_bytes_to_application(buf, len);
-                            logger::getInstance().logInfo("Blocking read successful: " + std::to_string(bytes_read) + " bytes from ch " + std::to_string(channel_id_));
+                            LOG_INFO("Blocking read successful: " << bytes_read << " bytes from ch " << channel_id_);
                             return bytes_read;
                         }
                     }
                 }
-                logger::getInstance().logError("Blocking read failed lookup for client " + std::to_string(client_id_) + " ch " + std::to_string(channel_id_) + ". Data dropped.");
+                LOG_ERROR("Blocking read failed lookup for client " << client_id_ << " ch " << channel_id_ << ". Data dropped.");
             }
         }
     }
 
     ssize_t write_to_channel(const channel_id &channel_id_, const client_id &client_id_, const char *buf, const size_t len) override
     {
-        logger::getInstance().logTest("Write to channel initiated: client " + std::to_string(client_id_) + " ch " + std::to_string(channel_id_) + " len " + std::to_string(len));
+        LOG_TEST("Write to channel initiated: client " << client_id_ << " ch " << channel_id_ << " len " << len);
 
         auto client_map_opt = per_client_channels.get(client_id_);
         if (!client_map_opt)
         {
-            logger::getInstance().logError("Write to channel failed: Client map missing for client " + std::to_string(client_id_));
+            LOG_ERROR("Write to channel failed: Client map missing for client " << client_id_);
             return -1;
         }
 
@@ -403,13 +401,13 @@ public:
         auto ch_opt = client_map->get(channel_id_);
         if (!ch_opt)
         {
-            logger::getInstance().logError("Write to channel failed: Channel object missing for ch " + std::to_string(channel_id_));
+            LOG_ERROR("Write to channel failed: Channel object missing for ch " << channel_id_);
             return -1;
         }
 
         auto cur_channel = ch_opt.value();
         ssize_t bytes_written = cur_channel->write_bytes_from_application(buf, len);
-        logger::getInstance().logInfo("Write to channel complete: " + std::to_string(bytes_written) + " bytes to ch " + std::to_string(channel_id_));
+        LOG_INFO("Write to channel complete: " << bytes_written << " bytes to ch " << channel_id_);
         return bytes_written;
     }
 
@@ -418,18 +416,18 @@ public:
     void on_transport_receive(const client_id &cl_id, std::unique_ptr<rudp_protocol_packet> pkt) override
     {
 
-        logger::getInstance().logTest("Transport Receive: Client " + std::to_string(cl_id) + ", Length " + std::to_string(pkt->get_length()));
+        LOG_TEST("Transport Receive: Client " << cl_id << ", Length " << pkt->get_length());
 
         auto client_map_opt = per_client_channels.get(cl_id);
         if (!client_map_opt)
         {
-            logger::getInstance().logError("Transport receive: Client map missing for client " + std::to_string(cl_id) + ". Packet dropped.");
+            LOG_ERROR("Transport receive: Client map missing for client " << cl_id << ". Packet dropped.");
             return;
         }
 
         if (pkt->get_length() < rudp_protocol_packet::CHANNEL_MANAGER_HEADER_OFFSET + rudp_protocol_packet::CHANNEL_MANAGER_HEADER_SIZE)
         {
-            logger::getInstance().logError(" packet too small for channel manager ");
+            LOG_ERROR(" packet too small for channel manager ");
             return;
         }
 
@@ -440,7 +438,7 @@ public:
             auto ch_opt = client_map->get(cm_header.ch_id);
             if (ch_opt)
             {
-                logger::getInstance().logTest("Transport receive: Forwarding packet to ch " + std::to_string(cm_header.ch_id));
+                LOG_TEST("Transport receive: Forwarding packet to ch " << cm_header.ch_id);
                 ch_opt.value()->on_transport_receive(std::move(pkt));
             }
             else
@@ -449,35 +447,35 @@ public:
                 if (res != nullptr)
                     on_transport_receive(cl_id, std::move(pkt));
                 else
-                    logger::getInstance().logError("Transport receive: Channel object missing for ch " + std::to_string(cm_header.ch_id) + ". Packet dropped.");
+                    LOG_ERROR("Transport receive: Channel object missing for ch " << cm_header.ch_id << ". Packet dropped.");
             }
         }
         else
         {
-            logger::getInstance().logError("Transport receive: Unknown channel ID " + std::to_string(cm_header.ch_id) + ". Packet dropped.");
+            LOG_ERROR("Transport receive: Unknown channel ID " << cm_header.ch_id << ". Packet dropped.");
         }
     }
 
     void add_client(const client_id &cl_id) override
     {
-        logger::getInstance().logInfo("Adding new client: " + std::to_string(cl_id));
+        LOG_INFO("Adding new client: " << cl_id);
         // create a new thread-safe channel map for this client
         per_client_channels.insert(cl_id, std::make_shared<channel_map_t>());
     }
     void remove_client(const client_id &cl_id) override
     {
-        logger::getInstance().logInfo("Client requested for removal: " + std::to_string(cl_id));
+        LOG_INFO("Client requested for removal: " << cl_id);
         pending_disconnects.insert(cl_id);
     }
 
     void set_timer_manager(std::shared_ptr<timer_manager> timer_man, server_setup_access_key)
     {
         global_timers_manager = timer_man;
-        logger::getInstance().logInfo("Timer manager set.");
+        LOG_INFO("Timer manager set.");
     }
     void set_session_control(std::shared_ptr<i_session_control_for_channel_manager> ses_control, server_setup_access_key)
     {
         session_control_ = ses_control;
-        logger::getInstance().logInfo("Session control set.");
+        LOG_INFO("Session control set.");
     }
 };

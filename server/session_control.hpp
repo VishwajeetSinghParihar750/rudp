@@ -94,19 +94,11 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
     connection_state_machine(std::function<void(uint8_t)> f, std::shared_ptr<timer_manager> timer_man)
         : current_state(CONNECTION_STATE::LISTEN), on_send_control_packet_to_transport(f), global_timer_manager(timer_man)
     {
-        logger::getInstance().logInfo("[connection_state_machine::connection_state_machine] FSM created, state: LISTEN");
+        LOG_INFO("[connection_state_machine::connection_state_machine] FSM created, state: LISTEN");
     }
     ~connection_state_machine()
     {
-        // std::lock_guard<std::recursive_mutex> lg(g_connection_state_machine_mutex);
-        // if (current_state.load() != CONNECTION_STATE::CLOSED)
-        // {
-        //     logger::getInstance().logWarning("FSM destructor called while not CLOSED. Sending RST.");
-        //     last_response = {get_rst_flag(), true};
-        //     send_response_to_network_without_piggybacking();
-        //     current_state.store(CONNECTION_STATE::CLOSED);
-        // }
-        logger::getInstance().logInfo("[connection_state_machine::~connection_state_machine] FSM destroyed.");
+        LOG_INFO("[connection_state_machine::~connection_state_machine] FSM destroyed.");
     }
 
     struct fsm_result
@@ -144,7 +136,7 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
         if ((toret.response_flags & (get_ack_flag())) && toret.to_send)
         {
             set_last_ack_sent_time();
-            logger::getInstance().logTest("[connection_state_machine::get_to_send_response] FSM piggybacking " + flags_to_string(toret.response_flags) + " on data packet.");
+            LOG_TEST("[connection_state_machine::get_to_send_response] FSM piggybacking " << flags_to_string(toret.response_flags) << " on data packet.");
         }
 
         last_response.to_send = false;
@@ -157,7 +149,7 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
         std::lock_guard<std::recursive_mutex> lg(g_connection_state_machine_mutex);
         if (last_response.to_send)
         {
-            logger::getInstance().logTest("[connection_state_machine::send_response_to_network_without_piggybacking] FSM sending control packet: " + flags_to_string(last_response.response_flags) + " (Standalone)");
+            LOG_TEST("[connection_state_machine::send_response_to_network_without_piggybacking] FSM sending control packet: " << flags_to_string(last_response.response_flags) << " (Standalone)");
 
             if (last_response.response_flags & (get_ack_flag()))
                 set_last_ack_sent_time();
@@ -174,7 +166,7 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
         if (current_state.load() != CONNECTION_STATE::LAST_ACK || retries_left <= 0)
             return;
 
-        logger::getInstance().logInfo("[connection_state_machine::last_ack_cb_with_retry] LAST_ACK retry " + std::to_string(6 - retries_left) + "/5");
+        LOG_INFO("[connection_state_machine::last_ack_cb_with_retry] LAST_ACK retry " << std::to_string(6 - retries_left) << "/5");
 
         last_response = {get_fin_flag(), true};
         send_response_to_network_without_piggybacking();
@@ -195,7 +187,7 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
         }
         else
         {
-            logger::getInstance().logWarning("[connection_state_machine::last_ack_cb_with_retry] LAST_ACK retries exhausted");
+            LOG_WARN("[connection_state_machine::last_ack_cb_with_retry] LAST_ACK retries exhausted");
         }
     }
 
@@ -222,7 +214,7 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
         else
         {
             current_state.store(CONNECTION_STATE::CLOSED);
-            logger::getInstance().logInfo("[connection_state_machine::time_wait_cb_with_retry] Transition: TIME_WAIT -> CLOSED (2*RTT elapsed).");
+            LOG_INFO("[connection_state_machine::time_wait_cb_with_retry] Transition: TIME_WAIT -> CLOSED (2*RTT elapsed).");
         }
     }
 
@@ -234,12 +226,12 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
     fsm_result close()
     {
         std::lock_guard<std::recursive_mutex> lg(g_connection_state_machine_mutex);
-        logger::getInstance().logInfo("[connection_state_machine::close] FSM close() called from state: " + state_to_string(current_state.load()));
+        LOG_INFO("[connection_state_machine::close] FSM close() called from state: " << state_to_string(current_state.load()));
 
         if (current_state.load() == CONNECTION_STATE::ESTABLISHED)
         {
             current_state.store(CONNECTION_STATE::LAST_ACK);
-            logger::getInstance().logInfo("[connection_state_machine::close] FSM state transition: ESTABLISHED -> LAST_ACK. Sending FIN.");
+            LOG_INFO("[connection_state_machine::close] FSM state transition: ESTABLISHED -> LAST_ACK. Sending FIN.");
 
             last_ack_cb_with_retry();
 
@@ -248,7 +240,7 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
 
         else
         {
-            logger::getInstance().logError("[connection_state_machine::close] FSM close() called from non-ESTABLISHED state. Sending RST. State: " + state_to_string(current_state.load()));
+            LOG_ERROR("[connection_state_machine::close] FSM close() called from non-ESTABLISHED state. Sending RST. State: " << state_to_string(current_state.load()));
             last_response = {get_rst_flag(), true};
             send_response_to_network_without_piggybacking();
 
@@ -260,11 +252,11 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
     fsm_result handle_change(uint8_t rcvd_flags)
     {
         std::lock_guard<std::recursive_mutex> lg(g_connection_state_machine_mutex);
-        logger::getInstance().logTest("[connection_state_machine::handle_change] FSM handle_change. Current: " + state_to_string(current_state.load()) + ", Received: " + flags_to_string(rcvd_flags));
+        LOG_TEST("[connection_state_machine::handle_change] FSM handle_change. Current: " << state_to_string(current_state.load()) << ", Received: " << flags_to_string(rcvd_flags));
 
         if (current_state.load() == CONNECTION_STATE::CLOSED)
         {
-            logger::getInstance().logWarning("[connection_state_machine::handle_change] FSM received packet in CLOSED state. Sending RST.");
+            LOG_WARN("[connection_state_machine::handle_change] FSM received packet in CLOSED state. Sending RST.");
             last_response = {get_rst_flag(), true};
             send_response_to_network_without_piggybacking();
             return {false, false};
@@ -278,7 +270,7 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
 
         if (rcvd_flags & get_rst_flag())
         {
-            logger::getInstance().logError("[connection_state_machine::handle_change] FSM received RST. Transition to CLOSED.");
+            LOG_ERROR("[connection_state_machine::handle_change] FSM received RST. Transition to CLOSED.");
             current_state.store(CONNECTION_STATE::CLOSED);
             return {true, true};
         }
@@ -290,7 +282,7 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
             {
                 current_state.store(CONNECTION_STATE::ESTABLISHED);
                 last_response = {get_ack_flag(), true};
-                logger::getInstance().logInfo("[connection_state_machine::handle_change] FSM state transition: LISTEN -> ESTABLISHED. Sending ACK.");
+                LOG_INFO("[connection_state_machine::handle_change] FSM state transition: LISTEN -> ESTABLISHED. Sending ACK.");
             }
             break;
 
@@ -298,7 +290,7 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
             if (rcvd_flags == get_fin_flag())
             {
                 current_state.store(CONNECTION_STATE::TIME_WAIT);
-                logger::getInstance().logInfo("[connection_state_machine::handle_change] FSM state transition: ESTABLISHED -> TIME_WAIT. Sending ACK and starting TIME_WAIT timer.");
+                LOG_INFO("[connection_state_machine::handle_change] FSM state transition: ESTABLISHED -> TIME_WAIT. Sending ACK and starting TIME_WAIT timer.");
 
                 last_response = {get_ack_flag(), true};
                 send_response_to_network_without_piggybacking();
@@ -311,7 +303,7 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
             {
 
                 last_response = {get_ack_flag(), true};
-                logger::getInstance().logWarning("[connection_state_machine::handle_change] FSM received unexpected SYN in ESTABLISHED. Responding with ACK (Possible retransmission).");
+                LOG_WARN("[connection_state_machine::handle_change] FSM received unexpected SYN in ESTABLISHED. Responding with ACK (Possible retransmission).");
             }
 
             break;
@@ -322,7 +314,7 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
 
                 last_response = {get_ack_flag(), true};
                 send_response_to_network_without_piggybacking();
-                logger::getInstance().logWarning("[connection_state_machine::handle_change] FSM TIME_WAIT received retransmitted FIN. Resending ACK.");
+                LOG_WARN("[connection_state_machine::handle_change] FSM TIME_WAIT received retransmitted FIN. Resending ACK.");
             }
             break;
 
@@ -330,13 +322,13 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
             if (rcvd_flags == get_ack_flag())
             {
                 current_state.store(CONNECTION_STATE::CLOSED);
-                logger::getInstance().logInfo("[connection_state_machine::handle_change] FSM state transition: LAST_ACK -> CLOSED. Received ACK for our FIN.");
+                LOG_INFO("[connection_state_machine::handle_change] FSM state transition: LAST_ACK -> CLOSED. Received ACK for our FIN.");
                 return {true, false};
             }
             break;
 
         default:
-            logger::getInstance().logWarning("[connection_state_machine::handle_change] FSM: Unhandled flags " + flags_to_string(rcvd_flags) + " in state " + state_to_string(current_state.load()));
+            LOG_WARN("[connection_state_machine::handle_change] FSM: Unhandled flags " << flags_to_string(rcvd_flags) << " in state " << state_to_string(current_state.load()));
             break;
         }
 
@@ -359,7 +351,7 @@ class session_control : public i_session_control_for_udp, public i_session_contr
 
     void perform_final_cleanup(client_id cl_id)
     {
-        logger::getInstance().logInfo("Session Control: Performing final cleanup for client " + std::to_string(cl_id));
+        LOG_INFO("Session Control: Performing final cleanup for client " << cl_id);
         auto addr_opt = clients_id_to_addr.get(cl_id);
         if (addr_opt)
         {
@@ -374,16 +366,16 @@ class session_control : public i_session_control_for_udp, public i_session_contr
         auto counter = teardown_counter.get(cl_id);
         if (!counter)
         {
-            logger::getInstance().logError("Session Control: Teardown triggered for client " + std::to_string(cl_id) + " but counter missing.");
+            LOG_ERROR("Session Control: Teardown triggered for client " << cl_id << " but counter missing.");
             return;
         }
 
         int previous_value = (*counter)->fetch_add(1);
-        logger::getInstance().logTest("Session Control: Teardown step triggered for client " + std::to_string(cl_id) + ". Counter: " + std::to_string(previous_value + 1));
+        LOG_TEST("Session Control: Teardown step triggered for client " << cl_id << ". Counter: " << (previous_value + 1));
 
         if (previous_value == 1)
         {
-            logger::getInstance().logInfo("Session Control: Both Teardown flags set (Net+App). Final cleanup for client " + std::to_string(cl_id));
+            LOG_INFO("Session Control: Both Teardown flags set (Net+App). Final cleanup for client " << cl_id);
             perform_final_cleanup(cl_id);
         }
     }
@@ -393,7 +385,7 @@ class session_control : public i_session_control_for_udp, public i_session_contr
         auto fsm_opt = clients_fsm.get(cl_id);
         if (!fsm_opt)
         {
-            logger::getInstance().logError("Session Control: Failed to add header, FSM missing for client " + std::to_string(cl_id));
+            LOG_ERROR("Session Control: Failed to add header, FSM missing for client " << cl_id);
             return;
         }
         connection_state_machine::to_send_response res = fsm_opt.value()->get_to_send_response();
@@ -404,7 +396,7 @@ class session_control : public i_session_control_for_udp, public i_session_contr
         if (res.to_send)
         {
             header.flags |= res.response_flags;
-            logger::getInstance().logTest("Session Control: Piggybacking flags " + flags_to_string(res.response_flags) + " on client " + std::to_string(cl_id) + " packet.");
+            LOG_TEST("Session Control: Piggybacking flags " << flags_to_string(res.response_flags) << " on client " << cl_id << " packet.");
         }
 
         uint32_t net_reserved = htonl(header.reserved);
@@ -417,13 +409,13 @@ class session_control : public i_session_control_for_udp, public i_session_contr
     {
         if (server_closed.load())
         {
-            logger::getInstance().logWarning("Session Control: Data exchange blocked (Server Closed).");
+            LOG_WARN("Session Control: Data exchange blocked (Server Closed).");
             return false;
         }
         auto fsm_opt = clients_fsm.get(cl_id);
         if (!fsm_opt)
         {
-            logger::getInstance().logError("Session Control: Data exchange blocked, FSM missing for client " + std::to_string(cl_id));
+            LOG_ERROR("Session Control: Data exchange blocked, FSM missing for client " << cl_id);
             return false;
         }
         return fsm_opt.value()->can_exchange_data();
@@ -438,13 +430,13 @@ class session_control : public i_session_control_for_udp, public i_session_contr
         uint32_t reserved = ntohl(reserved_net);
 
         uint8_t control_flags = flags & ((uint8_t(1) << 4) - 1);
-        logger::getInstance().logTest("Session Control: Received packet from " + source_addr.to_string() + ". Flags: " + flags_to_string(control_flags));
+        LOG_TEST("Session Control: Received packet from " << source_addr.to_string() << ". Flags: " << flags_to_string(control_flags));
 
         if (!clients_addr_to_id.contains(source_addr))
         {
             if (server_closed.load())
             {
-                logger::getInstance().logWarning("Session Control: Ignoring connection attempt (Server Closed).");
+                LOG_WARN("Session Control: Ignoring connection attempt (Server Closed).");
                 return;
             }
 
@@ -455,7 +447,7 @@ class session_control : public i_session_control_for_udp, public i_session_contr
                 cl_id = get_random_client_id();
             } while (clients_id_to_addr.contains(cl_id) || (cl_id == INVALID_CLIENT_ID));
 
-            logger::getInstance().logInfo("Session Control: New client detected at " + source_addr.to_string() + ". Assigned ID: " + std::to_string(cl_id));
+            LOG_INFO("Session Control: New client detected at " << source_addr.to_string() << ". Assigned ID: " << cl_id);
 
             teardown_counter.insert(cl_id, std::make_shared<std::atomic<int>>(0));
             create_fsm_for_client(cl_id, source_addr);
@@ -463,7 +455,7 @@ class session_control : public i_session_control_for_udp, public i_session_contr
             auto fsm_opt = clients_fsm.get(cl_id);
             if (!fsm_opt)
             {
-                logger::getInstance().logError("Session Control: FSM creation failed for new client " + std::to_string(cl_id));
+                LOG_ERROR("Session Control: FSM creation failed for new client " << cl_id);
                 return;
             }
 
@@ -471,7 +463,7 @@ class session_control : public i_session_control_for_udp, public i_session_contr
 
             if (res.close_connection)
             {
-                logger::getInstance().logWarning("Session Control: FSM immediately closed connection for new client. Erasing FSM/ID.");
+                LOG_WARN("Session Control: FSM immediately closed connection for new client. Erasing FSM/ID.");
                 teardown_counter.erase(cl_id);
                 clients_fsm.erase(cl_id);
             }
@@ -485,7 +477,7 @@ class session_control : public i_session_control_for_udp, public i_session_contr
                     if (auto cm_sp = channel_manager_ptr.lock())
                     {
                         cm_sp->add_client(cl_id);
-                        logger::getInstance().logInfo("Session Control: New client " + std::to_string(cl_id) + " notified to Channel Manager.");
+                        LOG_INFO("Session Control: New client " << cl_id << " notified to Channel Manager.");
                     }
                 }
             }
@@ -495,7 +487,7 @@ class session_control : public i_session_control_for_udp, public i_session_contr
             auto cid_opt = clients_addr_to_id.get(source_addr);
             if (!cid_opt)
             {
-                logger::getInstance().logError("Session Control: Lookup failed for existing address " + source_addr.to_string());
+                LOG_ERROR("Session Control: Lookup failed for existing address " << source_addr.to_string());
                 return;
             }
             client_id cl_id = cid_opt.value();
@@ -503,7 +495,7 @@ class session_control : public i_session_control_for_udp, public i_session_contr
             auto fsm_opt = clients_fsm.get(cl_id);
             if (!fsm_opt)
             {
-                logger::getInstance().logWarning("Session Control: Received packet from known address, but FSM missing for client " + std::to_string(cl_id) + ". Ignoring.");
+                LOG_WARN("Session Control: Received packet from known address, but FSM missing for client " << cl_id << ". Ignoring.");
                 return;
             }
 
@@ -513,7 +505,7 @@ class session_control : public i_session_control_for_udp, public i_session_contr
             {
                 if (!teardown_counter.contains(cl_id))
                 {
-                    logger::getInstance().logError("Session Control: Missing counter during close_connection for client " + std::to_string(cl_id) + ". Created new counter.");
+                    LOG_ERROR("Session Control: Missing counter during close_connection for client " << cl_id << ". Created new counter.");
                 }
 
                 trigger_teardown_step(cl_id);
@@ -525,11 +517,11 @@ class session_control : public i_session_control_for_udp, public i_session_contr
                 {
                     if (!teardown_counter.contains(cl_id))
                     {
-                        logger::getInstance().logError("Session Control: Missing counter during stop_data_exchange for client " + std::to_string(cl_id) + ". Created new counter.");
+                        LOG_ERROR("Session Control: Missing counter during stop_data_exchange for client " << cl_id << ". Created new counter.");
                     }
 
                     sp->remove_client(cl_id);
-                    logger::getInstance().logInfo("Session Control: Notifying Channel Manager of client removal for " + std::to_string(cl_id));
+                    LOG_INFO("Session Control: Notifying Channel Manager of client removal for " << cl_id);
                 }
             }
         }
@@ -543,12 +535,11 @@ class session_control : public i_session_control_for_udp, public i_session_contr
 
                                                                                 uint32_t net_reserved = 0;
                                                                                 
-                                                                                
                                                                                 memcpy(buf, &fsm_flags, sizeof(fsm_flags));
                                                                                 
                                                                                 memcpy(buf + sizeof(fsm_flags), &net_reserved, sizeof(net_reserved)); 
                                                                                 
-                                                                                logger::getInstance().logInfo("Control Packet Send: Client " + std::to_string(cl_id) + ", Flags: " + flags_to_string(fsm_flags));
+                                                                                LOG_INFO("Control Packet Send: Client " << cl_id << ", Flags: " << flags_to_string(fsm_flags));
                                                                                 this->udp_ptr->send_packet_to_network(source_addr, buf, sizeof(buf)); }, global_timer_manager));
     }
 
@@ -564,22 +555,22 @@ public:
     void set_timer_manager(std::shared_ptr<timer_manager> timer_man, server_setup_access_key)
     {
         global_timer_manager = timer_man;
-        logger::getInstance().logInfo("Session Control: Timer Manager set.");
+        LOG_INFO("Session Control: Timer Manager set.");
     }
     void set_udp(std::shared_ptr<i_udp_for_session_control> udp_ptr_, server_setup_access_key)
     {
         udp_ptr = udp_ptr_;
-        logger::getInstance().logInfo("Session Control: UDP Transport set.");
+        LOG_INFO("Session Control: UDP Transport set.");
     }
     void set_channel_manager(std::weak_ptr<i_channel_manager_for_session_control> channel_manager_, server_setup_access_key)
     {
         channel_manager_ptr = channel_manager_;
-        logger::getInstance().logInfo("Session Control: Channel Manager set.");
+        LOG_INFO("Session Control: Channel Manager set.");
     }
 
     void on_close_server() override
     {
-        logger::getInstance().logCritical("Session Control: Server closure initiated.");
+        LOG_CRITICAL("Session Control: Server closure initiated.");
         server_closed.store(true);
 
         std::vector<client_id> to_clean_up;
@@ -592,12 +583,12 @@ public:
             if (res.close_connection)
             {
                 to_clean_up.push_back(cl_id);
-                logger::getInstance().logInfo("Session Control: Client " + std::to_string(cl_id) + " FSM closed immediately. Preparing for cleanup.");
+                LOG_INFO("Session Control: Client " << cl_id << " FSM closed immediately. Preparing for cleanup.");
             }
             else
             {
                 trigger_teardown_step(cl_id);
-                logger::getInstance().logInfo("Session Control: Client " + std::to_string(cl_id) + " starting graceful teardown (Counter=1).");
+                LOG_INFO("Session Control: Client " << cl_id << " starting graceful teardown (Counter=1).");
             }
         }
         for (auto i : to_clean_up)
@@ -605,7 +596,7 @@ public:
 
         if (clients_fsm.size() > 0)
         {
-            logger::getInstance().logInfo("Session Control: Waiting for graceful FSM closures. Starting poll timer.");
+            LOG_INFO("Session Control: Waiting for graceful FSM closures. Starting poll timer.");
             auto this_shared_ptr = shared_from_this();
             std::function<void()> cb = [this_shared_ptr, cb]
             {
@@ -615,7 +606,7 @@ public:
                 }
                 else
                 {
-                    logger::getInstance().logCritical("Session Control: All client FSMs gracefully closed.");
+                    LOG_CRITICAL("Session Control: All client FSMs gracefully closed.");
                 }
             };
 
@@ -624,7 +615,7 @@ public:
     }
     void notify_removal_of_client(const client_id &cl_id) override
     {
-        logger::getInstance().logInfo("Session Control: Channel Manager notified client removal for " + std::to_string(cl_id) + " (App side teardown).");
+        LOG_INFO("Session Control: Channel Manager notified client removal for " << cl_id << " (App side teardown).");
         trigger_teardown_step(cl_id);
     }
 
@@ -633,7 +624,7 @@ public:
 
         if (pkt->get_length() < rudp_protocol_packet::SESSION_CONTROL_HEADER_OFFSET + rudp_protocol_packet::SESSION_CONTROL_HEADER_SIZE)
         {
-            logger::getInstance().logCritical("Received packet but too small for session control. Dropping.");
+            LOG_CRITICAL("Received packet but too small for session control. Dropping.");
             return;
         }
         parse_session_control_packet_header(*pkt, *source_addr);
@@ -647,19 +638,19 @@ public:
                 if (auto cm_sp = channel_manager_ptr.lock())
                 {
 
-                    logger::getInstance().logTest("Session Control: Forwarding data packet to Channel Manager for client " + std::to_string(cl_id));
+                    LOG_TEST("Session Control: Forwarding data packet to Channel Manager for client " << cl_id);
                     cm_sp->on_transport_receive(cl_id, std::move(pkt));
                 }
             }
             else
             {
-                logger::getInstance().logWarning("Session Control: Dropping data packet for client " + std::to_string(cl_id) + " due to FSM state.");
+                LOG_WARN("Session Control: Dropping data packet for client " << cl_id << " due to FSM state.");
             }
         }
         else
         {
 
-            logger::getInstance().logWarning("Session Control: Dropping data packet from unknown address " + source_addr->to_string());
+            LOG_WARN("Session Control: Dropping data packet from unknown address " << source_addr->to_string());
         }
     }
 
@@ -671,17 +662,17 @@ public:
             auto addr_opt = clients_id_to_addr.get(cl_id);
             if (addr_opt)
             {
-                logger::getInstance().logInfo("Session Control: Sending data packet for client " + std::to_string(cl_id) + ", length " + std::to_string(pkt->get_length()));
+                LOG_INFO("Session Control: Sending data packet for client " << cl_id << ", length " << pkt->get_length());
                 udp_ptr->send_packet_to_network(addr_opt.value(), pkt->get_buffer(), pkt->get_length());
             }
             else
             {
-                logger::getInstance().logError("Session Control: Failed to send packet, address missing for client " + std::to_string(cl_id));
+                LOG_ERROR("Session Control: Failed to send packet, address missing for client " << cl_id);
             }
         }
         else
         {
-            logger::getInstance().logWarning("Session Control: Dropping outgoing data packet for client " + std::to_string(cl_id) + " due to FSM state.");
+            LOG_WARN("Session Control: Dropping outgoing data packet for client " << cl_id << " due to FSM state.");
         }
     }
 };

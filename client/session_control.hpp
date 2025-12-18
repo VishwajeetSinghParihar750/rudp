@@ -89,7 +89,7 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
 {
     std::recursive_mutex g_connection_state_machine_mutex;
 
-    static constexpr uint32_t ROUND_TRIP_TIME = 2000; // ℹ️ NEED TO KNOWx`
+    static constexpr uint32_t ROUND_TRIP_TIME = 2000;
 
     std::atomic<CONNECTION_STATE> current_state = CONNECTION_STATE::SYN_SENT;
 
@@ -99,9 +99,7 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
     connection_state_machine(std::function<void(uint8_t)> f, std::shared_ptr<timer_manager> timer_man)
         : current_state(CONNECTION_STATE::SYN_SENT), on_send_control_packet_to_transport(f), global_timer_manager(timer_man)
     {
-        std::ostringstream oss;
-        oss << "[connection_state_machine::connection_state_machine] FSM initialized in state: " << connection_state_to_string(current_state.load());
-        logger::getInstance().logInfo(oss.str());
+        LOG_INFO("[connection_state_machine::connection_state_machine] FSM initialized in state: " << connection_state_to_string(current_state.load()));
     }
 
     ~connection_state_machine()
@@ -109,15 +107,13 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
         std::lock_guard<std::recursive_mutex> lg(g_connection_state_machine_mutex);
         if (current_state.load() != CONNECTION_STATE::CLOSED)
         {
-            std::ostringstream oss;
-            oss << "[connection_state_machine::~connection_state_machine] FSM destructed while in state: " << connection_state_to_string(current_state.load()) << ". Sending RST.";
-            logger::getInstance().logWarning(oss.str());
+            LOG_WARN("[connection_state_machine::~connection_state_machine] FSM destructed while in state: " << connection_state_to_string(current_state.load()) << ". Sending RST.");
             last_response = {get_rst_flag(), true};
             send_response_to_network_without_piggybacking();
         }
         else
         {
-            logger::getInstance().logInfo("[connection_state_machine::~connection_state_machine] FSM destructed gracefully in CLOSED state.");
+            LOG_INFO("[connection_state_machine::~connection_state_machine] FSM destructed gracefully in CLOSED state.");
         }
     }
     bool can_exchange_data()
@@ -163,9 +159,7 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
 
         if (toret.to_send)
         {
-            std::ostringstream oss;
-            oss << "[connection_state_machine::get_to_send_response] Piggybacking control flags: " << control_flags_to_string(toret.response_flags) << ". Current state: " << connection_state_to_string(current_state.load());
-            logger::getInstance().logInfo(oss.str());
+            LOG_INFO("[connection_state_machine::get_to_send_response] Piggybacking control flags: " << control_flags_to_string(toret.response_flags) << ". Current state: " << connection_state_to_string(current_state.load()));
         }
 
         return toret;
@@ -179,9 +173,7 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
             if (last_response.response_flags & (get_ack_flag()))
                 set_last_ack_sent_time();
 
-            std::ostringstream oss;
-            oss << "[connection_state_machine::send_response_to_network_without_piggybacking] Sending standalone control packet with flags: " << control_flags_to_string(last_response.response_flags) << ". Current state: " << connection_state_to_string(current_state.load());
-            logger::getInstance().logInfo(oss.str());
+            LOG_INFO("[connection_state_machine::send_response_to_network_without_piggybacking] Sending standalone control packet with flags: " << control_flags_to_string(last_response.response_flags) << ". Current state: " << connection_state_to_string(current_state.load()));
 
             on_send_control_packet_to_transport(last_response.response_flags);
             last_response.to_send = false;
@@ -200,10 +192,7 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
         if (current_state.load() != CONNECTION_STATE::LAST_ACK || retries_left <= 0)
             return;
 
-        logger::getInstance().logInfo("LAST_ACK retry " +
-                                      std::to_string(6 - retries_left) + "/5");
-        // Context-rich log
-        logger::getInstance().logInfo("[connection_state_machine::last_ack_cb_with_retry] LAST_ACK retry " + std::to_string(6 - retries_left) + "/5");
+        LOG_INFO("[connection_state_machine::last_ack_cb_with_retry] LAST_ACK retry " << std::to_string(6 - retries_left) << "/5");
 
         last_response = {get_fin_flag(), true};
         send_response_to_network_without_piggybacking();
@@ -224,7 +213,7 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
         }
         else
         {
-            logger::getInstance().logWarning("[connection_state_machine::last_ack_cb_with_retry] LAST_ACK retries exhausted");
+            LOG_WARN("[connection_state_machine::last_ack_cb_with_retry] LAST_ACK retries exhausted");
         }
     }
 
@@ -251,7 +240,7 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
         else
         {
             current_state.store(CONNECTION_STATE::CLOSED);
-            logger::getInstance().logInfo("[connection_state_machine::time_wait_cb_with_retry] Transition: TIME_WAIT -> CLOSED (2*RTT elapsed).");
+            LOG_INFO("[connection_state_machine::time_wait_cb_with_retry] Transition: TIME_WAIT -> CLOSED (2*RTT elapsed).");
         }
     }
 
@@ -269,7 +258,7 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
         if (old_state == CONNECTION_STATE::ESTABLISHED)
         {
             current_state.store(CONNECTION_STATE::LAST_ACK);
-            logger::getInstance().logInfo("[connection_state_machine::close] Application requested close. Transitioning to LAST_ACK state. Sending FIN.");
+            LOG_INFO("[connection_state_machine::close] Application requested close. Transitioning to LAST_ACK state. Sending FIN.");
 
             last_ack_cb_with_retry();
 
@@ -278,9 +267,7 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
 
         else
         {
-            std::ostringstream oss;
-            oss << "Application requested close from state: " << connection_state_to_string(old_state) << ". Sending RST and forcing CLOSED.";
-            logger::getInstance().logWarning(std::string("[connection_state_machine::close] ") + oss.str());
+            LOG_WARN("[connection_state_machine::close] Application requested close from state: " << connection_state_to_string(old_state) << ". Sending RST and forcing CLOSED.");
             last_response = {get_rst_flag(), true};
             send_response_to_network_without_piggybacking();
 
@@ -294,13 +281,11 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
 
         std::lock_guard<std::recursive_mutex> lg(g_connection_state_machine_mutex);
 
-        std::ostringstream oss_rcv;
-        oss_rcv << "Received flags: " << control_flags_to_string(rcvd_flags) << ". Current state: " << connection_state_to_string(current_state.load());
-        logger::getInstance().logInfo(std::string("[connection_state_machine::handle_change] ") + oss_rcv.str());
+        LOG_INFO("[connection_state_machine::handle_change] Received flags: " << control_flags_to_string(rcvd_flags) << ". Current state: " << connection_state_to_string(current_state.load()));
 
         if (current_state.load() == CONNECTION_STATE::CLOSED)
         {
-            logger::getInstance().logWarning("Received packet in CLOSED state. Sending RST and ignoring.");
+            LOG_WARN("[connection_state_machine::handle_change] Received packet in CLOSED state. Sending RST and ignoring.");
             last_response = {get_rst_flag(), true};
             send_response_to_network_without_piggybacking();
             return {false, false};
@@ -308,14 +293,13 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
 
         if (last_response.to_send)
         {
-            logger::getInstance().logWarning("Pending control packet to send. Sending it now without piggybacking to avoid delay.");
+            LOG_WARN("[connection_state_machine::handle_change] Pending control packet to send. Sending it now without piggybacking to avoid delay.");
             send_response_to_network_without_piggybacking();
-            // After sending, continue processing the received packet to avoid unnecessary looping/delay on the receiver side
         }
 
         if (rcvd_flags & get_rst_flag())
         {
-            logger::getInstance().logCritical("Received RST flag. Forcing transition to CLOSED.");
+            LOG_CRITICAL("[connection_state_machine::handle_change] Received RST flag. Forcing transition to CLOSED.");
             current_state.store(CONNECTION_STATE::CLOSED);
             return {true, true};
         }
@@ -329,13 +313,11 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
             {
                 current_state.store(CONNECTION_STATE::ESTABLISHED);
                 last_response = {0, false};
-                logger::getInstance().logInfo("Transition: SYN_SENT -> ESTABLISHED (Received ACK).");
+                LOG_INFO("[connection_state_machine::handle_change] Transition: SYN_SENT -> ESTABLISHED (Received ACK).");
             }
             else
             {
-                std::ostringstream oss;
-                oss << "SYN_SENT: Unexpected flags received: " << control_flags_to_string(rcvd_flags) << ". Ignoring.";
-                logger::getInstance().logWarning(oss.str());
+                LOG_WARN("[connection_state_machine::handle_change] SYN_SENT: Unexpected flags received: " << control_flags_to_string(rcvd_flags) << ". Ignoring.");
             }
             break;
 
@@ -346,7 +328,7 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
 
                 last_response = {get_ack_flag(), true};
                 send_response_to_network_without_piggybacking();
-                logger::getInstance().logInfo("Transition: ESTABLISHED -> TIME_WAIT (Received FIN, sending ACK).");
+                LOG_INFO("[connection_state_machine::handle_change] Transition: ESTABLISHED -> TIME_WAIT (Received FIN, sending ACK).");
 
                 time_wait_cb_with_retry();
 
@@ -357,10 +339,9 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
         case CONNECTION_STATE::TIME_WAIT:
             if (rcvd_flags == get_fin_flag())
             {
-                // means ack got lost for fin
                 last_response = {get_ack_flag(), true};
                 send_response_to_network_without_piggybacking();
-                logger::getInstance().logWarning("TIME_WAIT: Received duplicate FIN (ACK likely lost). Re-sending ACK.");
+                LOG_WARN("[connection_state_machine::handle_change] TIME_WAIT: Received duplicate FIN (ACK likely lost). Re-sending ACK.");
             }
             break;
 
@@ -368,15 +349,13 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
             if (rcvd_flags == get_ack_flag())
             {
                 current_state.store(CONNECTION_STATE::CLOSED);
-                logger::getInstance().logInfo("Transition: LAST_ACK -> CLOSED (Received ACK for FIN).");
+                LOG_INFO("[connection_state_machine::handle_change] Transition: LAST_ACK -> CLOSED (Received ACK for FIN).");
                 return {true, false};
             }
             break;
 
         default:
-            std::ostringstream oss;
-            oss << "FSM in unhandled state: " << connection_state_to_string(current_state.load()) << " with flags: " << control_flags_to_string(rcvd_flags) << ". Ignoring.";
-            logger::getInstance().logError(oss.str());
+            LOG_ERROR("[connection_state_machine::handle_change] FSM in unhandled state: " << connection_state_to_string(current_state.load()) << " with flags: " << control_flags_to_string(rcvd_flags) << ". Ignoring.");
             break;
         }
 
@@ -399,9 +378,7 @@ class session_control : public i_session_control_for_udp, public i_session_contr
         if (!teardown_counter)
             return;
         int count = teardown_counter->fetch_add(1) + 1;
-        std::ostringstream oss;
-        oss << "Teardown step triggered. Counter: " << count;
-        logger::getInstance().logInfo(oss.str());
+        LOG_INFO("Teardown step triggered. Counter: " << count);
     }
 
     void add_session_control_header(rudp_protocol_packet &pkt)
@@ -416,35 +393,30 @@ class session_control : public i_session_control_for_udp, public i_session_contr
             header.flags |= res.response_flags;
 
         header.reserved = htonl(header.reserved);
-        //
+
         memcpy(pkt.get_buffer() + rudp_protocol_packet::SESSION_CONTROL_HEADER_OFFSET, &header.flags, sizeof(header.flags));
         memcpy(pkt.get_buffer() + rudp_protocol_packet::SESSION_CONTROL_HEADER_OFFSET + sizeof(header.flags), &header.reserved, sizeof(header.reserved));
 
         if (res.to_send)
         {
-            std::ostringstream oss;
-            oss << "Added session control header with flags: " << control_flags_to_string(res.response_flags) << " to outgoing packet.";
-            logger::getInstance().logInfo(oss.str());
+            LOG_INFO("Added session control header with flags: " << control_flags_to_string(res.response_flags) << " to outgoing packet.");
         }
     }
 
     bool verify_can_exchange_data()
     {
-        bool can_exchange = client_fsm && client_fsm->can_exchange_data();
-        if (!can_exchange)
-        {
-            std::ostringstream oss;
-            oss << "Data exchange blocked. Current FSM state: " << connection_state_to_string(client_fsm ? client_fsm->current_state.load() : CONNECTION_STATE::CLOSED);
-            logger::getInstance().logWarning(oss.str());
-        }
-        return can_exchange;
+        if (client_fsm && client_fsm->can_exchange_data())
+            return true;
+
+        LOG_WARN("Data exchange blocked. Current FSM state: " << connection_state_to_string(client_fsm ? client_fsm->current_state.load() : CONNECTION_STATE::CLOSED));
+        return false;
     }
 
     void parse_session_control_packet_header(const rudp_protocol_packet &incoming_pkt)
     {
         if (!client_fsm)
         {
-            logger::getInstance().logCritical("FSM is null during packet parse. Dropping packet.");
+            LOG_CRITICAL("FSM is null during packet parse. Dropping packet.");
             return;
         }
 
@@ -453,9 +425,7 @@ class session_control : public i_session_control_for_udp, public i_session_contr
         reserved = ntohl(reserved);
 
         connection_state_machine::fsm_result res = client_fsm->handle_change(flags & ((uint8_t(1) << 4) - 1));
-        std::ostringstream oss;
-        oss << "Parsed session control header with flags: " << control_flags_to_string(flags & ((uint8_t(1) << 4) - 1)) << ". FSM result: close_connection=" << res.close_connection << ", stop_data_exchange=" << res.stop_data_exchange;
-        logger::getInstance().logInfo(oss.str());
+        LOG_INFO("Parsed session control header with flags: " << control_flags_to_string(flags & ((uint8_t(1) << 4) - 1)) << ". FSM result: close_connection=" << res.close_connection << ", stop_data_exchange=" << res.stop_data_exchange);
 
         if (res.close_connection)
             trigger_teardown_step();
@@ -466,13 +436,12 @@ class session_control : public i_session_control_for_udp, public i_session_contr
             {
                 sp->on_server_disconnected();
                 trigger_teardown_step();
-                logger::getInstance().logCritical("FSM indicated stop data exchange. Notifying channel manager of server disconnect.");
+                LOG_CRITICAL("FSM indicated stop data exchange. Notifying channel manager of server disconnect.");
             }
         }
     }
 
 public:
-    // selective access
     class client_setup_access_key
     {
         friend std::shared_ptr<i_client> create_client(const char *, const char *);
@@ -483,25 +452,22 @@ public:
 
     session_control()
     {
-        logger::getInstance().logInfo("session_control object created.");
+        LOG_INFO("session_control object created.");
     }
 
-    // Defer FSM creation until timer_manager is set
     void initialize_fsm_after_dependencies()
     {
         client_fsm = std::make_shared<connection_state_machine>([this](uint8_t fsm_flags)
                                                                 {
             char buf[rudp_protocol_packet::SESSION_CONTROL_HEADER_SIZE];
-            uint32_t reserved = 0; // Not used currently, but part of the header struct
+            uint32_t reserved = 0; 
             uint32_t net_reserved = htonl(reserved);
 
             memcpy(buf, &fsm_flags, sizeof(fsm_flags));
             memcpy(buf + sizeof(fsm_flags), &net_reserved, sizeof(net_reserved));
 
             this->udp_ptr->send_packet_to_network(buf, sizeof(buf)); 
-            std::ostringstream oss;
-            oss << "FSM triggered standalone control packet send with flags: " << control_flags_to_string(fsm_flags);
-            logger::getInstance().logInfo(oss.str()); }, global_timer_manager);
+            LOG_INFO("FSM triggered standalone control packet send with flags: " << control_flags_to_string(fsm_flags)); }, global_timer_manager);
     }
 
     void set_timer_manager(std::shared_ptr<timer_manager> timer_man, client_setup_access_key) { global_timer_manager = timer_man; }
@@ -513,7 +479,6 @@ public:
     void set_channel_manager(std::weak_ptr<i_channel_manager_for_session_control> channel_manager_, client_setup_access_key)
     {
         channel_manager_ptr = channel_manager_;
-        // Now that all dependencies are set, initialize FSM (assuming client creation handles this)
     }
     void on_close_client() override
     {
@@ -523,40 +488,40 @@ public:
         if (res.close_connection)
             trigger_teardown_step();
 
-        logger::getInstance().logInfo("Teardowncounter value : ." + std::to_string(teardown_counter->load()));
+        LOG_INFO("Teardowncounter value : ." << std::to_string(teardown_counter->load()));
 
         if (teardown_counter->load() < 2)
         {
-            logger::getInstance().logInfo("Teardown not complete. Starting polling timer.");
+            LOG_INFO("Teardown not complete. Starting polling timer.");
             auto this_shared_ptr = shared_from_this();
             std::function<void()> cb = [this_shared_ptr, cb]
             {
                 if (this_shared_ptr->teardown_counter->load() < 2)
                 {
-                    logger::getInstance().logInfo("Teardown polling timer tick. Counter < 2. Rescheduling.");
+                    LOG_INFO("Teardown polling timer tick. Counter < 2. Rescheduling.");
                     this_shared_ptr->global_timer_manager->add_timer(std::make_unique<timer_info>(duration_ms(100), cb));
                 }
                 else
                 {
-                    logger::getInstance().logInfo("Teardown complete (Counter >= 2). Stopping polling.");
+                    LOG_INFO("Teardown complete (Counter >= 2). Stopping polling.");
                 }
             };
 
             global_timer_manager->add_timer(std::make_unique<timer_info>(duration_ms(100), cb));
-        } // this shared ptr will keep session control alive until all fsms gracefully close
+        }
     }
 
     void on_transport_receive(std::unique_ptr<rudp_protocol_packet> pkt) override
     {
         if (!client_fsm)
         {
-            logger::getInstance().logCritical("Received packet but client_fsm is null. Dropping.");
+            LOG_CRITICAL("Received packet but client_fsm is null. Dropping.");
             return;
         }
 
         if (pkt->get_length() < rudp_protocol_packet::SESSION_CONTROL_HEADER_OFFSET + rudp_protocol_packet::SESSION_CONTROL_HEADER_SIZE)
         {
-            logger::getInstance().logCritical("Received packet but too small for session control. Dropping.");
+            LOG_CRITICAL("Received packet but too small for session control. Dropping.");
             return;
         }
 
@@ -566,15 +531,15 @@ public:
             if (auto cm_sp = channel_manager_ptr.lock())
             {
                 cm_sp->on_transport_receive(std::move(pkt));
-                logger::getInstance().logInfo("Forwarding received data to channel manager.");
+                LOG_INFO("Forwarding received data to channel manager.");
             }
             else
             {
-                logger::getInstance().logWarning("Data received, FSM allows exchange, but channel manager is null/expired. Dropping data.");
+                LOG_WARN("Data received, FSM allows exchange, but channel manager is null/expired. Dropping data.");
             }
         else
         {
-            logger::getInstance().logWarning("Data exchange not allowed by FSM. Dropping received data packet.");
+            LOG_WARN("Data exchange not allowed by FSM. Dropping received data packet.");
         }
     }
     void on_server_disconnected() override
@@ -589,7 +554,7 @@ public:
     {
         if (!client_fsm)
         {
-            logger::getInstance().logCritical("Attempted to send data but client_fsm is null. Dropping.");
+            LOG_CRITICAL("Attempted to send data but client_fsm is null. Dropping.");
             return;
         }
 
@@ -597,11 +562,11 @@ public:
         {
             add_session_control_header(*pkt);
             udp_ptr->send_packet_to_network(pkt->get_buffer(), pkt->get_length());
-            logger::getInstance().logInfo("Sending data packet to network via UDP.");
+            LOG_INFO("Sending data packet to network via UDP.");
         }
         else
         {
-            logger::getInstance().logWarning("Data exchange not allowed by FSM. Dropping data packet for transmission.");
+            LOG_WARN("Data exchange not allowed by FSM. Dropping data packet for transmission.");
         }
     }
 };

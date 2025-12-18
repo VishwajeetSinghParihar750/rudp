@@ -4,6 +4,7 @@
 #include <iostream>
 #include <ostream>
 #include <mutex>
+#include <sstream>
 
 class logger
 {
@@ -28,6 +29,12 @@ public:
         static logger instance;
         return instance;
     }
+
+    bool isInfoEnabled() const { return info_on; }
+    bool isWarningEnabled() const { return warning_on; }
+    bool isErrorEnabled() const { return error_on; }
+    bool isCriticalEnabled() const { return critical_on; }
+    bool isTestEnabled() const { return test_on; }
 
     void setInfoEnabled(bool enable) { info_on = enable; }
     void setErrorEnabled(bool enable) { error_on = enable; }
@@ -80,3 +87,58 @@ public:
         }
     }
 };
+
+#define LOG_INFO(msg)                                 \
+    do                                                \
+    {                                                 \
+        if (logger::getInstance().isInfoEnabled())    \
+        {                                             \
+            std::ostringstream oss;                   \
+            oss << msg;                               \
+            logger::getInstance().logInfo(oss.str()); \
+        }                                             \
+    } while (0)
+
+#define LOG_WARN(msg)                                    \
+    do                                                   \
+    {                                                    \
+        if (logger::getInstance().isWarningEnabled())    \
+        {                                                \
+            std::ostringstream oss;                      \
+            oss << msg;                                  \
+            logger::getInstance().logWarning(oss.str()); \
+        }                                                \
+    } while (0)
+
+#define LOG_ERROR(msg)                                 \
+    do                                                 \
+    {                                                  \
+        if (logger::getInstance().isErrorEnabled())    \
+        {                                              \
+            std::ostringstream oss;                    \
+            oss << msg;                                \
+            logger::getInstance().logError(oss.str()); \
+        }                                              \
+    } while (0)
+
+#define LOG_CRITICAL(msg)                                 \
+    do                                                    \
+    {                                                     \
+        if (logger::getInstance().isCriticalEnabled())    \
+        {                                                 \
+            std::ostringstream oss;                       \
+            oss << msg;                                   \
+            logger::getInstance().logCritical(oss.str()); \
+        }                                                 \
+    } while (0)
+
+#define LOG_TEST(msg)                                 \
+    do                                                \
+    {                                                 \
+        if (logger::getInstance().isTestEnabled())    \
+        {                                             \
+            std::ostringstream oss;                   \
+            oss << msg;                               \
+            logger::getInstance().logTest(oss.str()); \
+        }                                             \
+    } while (0)
