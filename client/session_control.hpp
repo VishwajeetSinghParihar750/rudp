@@ -15,7 +15,7 @@
 
 #include "../common/transport_addr.hpp"
 #include "../common/rudp_protocol_packet.hpp"
-#include "../common/timer_manager.hpp"
+#include "../common/i_timer_service.hpp"
 #include "../common/thread_safe_unordered_map.hpp"
 #include "../common/types.hpp"
 #include "../common/logger.hpp"
@@ -94,9 +94,9 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
     std::atomic<CONNECTION_STATE> current_state = CONNECTION_STATE::SYN_SENT;
 
     std::function<void(uint8_t)> on_send_control_packet_to_transport;
-    std::shared_ptr<timer_manager> global_timer_manager;
+    std::shared_ptr<i_timer_service> global_timer_manager;
 
-    connection_state_machine(std::function<void(uint8_t)> f, std::shared_ptr<timer_manager> timer_man)
+    connection_state_machine(std::function<void(uint8_t)> f, std::shared_ptr<i_timer_service> timer_man)
         : current_state(CONNECTION_STATE::SYN_SENT), on_send_control_packet_to_transport(f), global_timer_manager(timer_man)
     {
         LOG_INFO("[connection_state_machine::connection_state_machine] FSM initialized in state: " << connection_state_to_string(current_state.load()));
@@ -366,7 +366,7 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
 class session_control : public i_session_control_for_udp, public i_session_control_for_channel_manager, public std::enable_shared_from_this<session_control>
 {
 
-    std::shared_ptr<timer_manager> global_timer_manager;
+    std::shared_ptr<i_timer_service> global_timer_manager;
     std::shared_ptr<i_udp_for_session_control> udp_ptr;
     std::weak_ptr<i_channel_manager_for_session_control> channel_manager_ptr;
     std::shared_ptr<connection_state_machine> client_fsm;
@@ -420,9 +420,16 @@ class session_control : public i_session_control_for_udp, public i_session_contr
             return;
         }
 
-        uint8_t flags = *reinterpret_cast<const uint8_t *>(incoming_pkt.get_const_buffer() + rudp_protocol_packet::SESSION_CONTROL_HEADER_OFFSET);
-        uint32_t reserved = *reinterpret_cast<const uint32_t *>(incoming_pkt.get_const_buffer() + rudp_protocol_packet::SESSION_CONTROL_HEADER_OFFSET + sizeof(flags));
-        reserved = ntohl(reserved);
+        uint8_t flags;
+        uint32_t reserved_net;
+
+        const uint8_t *buf = reinterpret_cast<const uint8_t *>(
+            incoming_pkt.get_const_buffer());
+
+        std::memcpy(&flags, buf, sizeof(flags));
+        std::memcpy(&reserved_net, buf + sizeof(flags), sizeof(reserved_net));
+
+        uint32_t reserved = ntohl(reserved_net);
 
         connection_state_machine::fsm_result res = client_fsm->handle_change(flags & ((uint8_t(1) << 4) - 1));
         LOG_INFO("Parsed session control header with flags: " << control_flags_to_string(flags & ((uint8_t(1) << 4) - 1)) << ". FSM result: close_connection=" << res.close_connection << ", stop_data_exchange=" << res.stop_data_exchange);
@@ -470,7 +477,7 @@ public:
             LOG_INFO("FSM triggered standalone control packet send with flags: " << control_flags_to_string(fsm_flags)); }, global_timer_manager);
     }
 
-    void set_timer_manager(std::shared_ptr<timer_manager> timer_man, client_setup_access_key) { global_timer_manager = timer_man; }
+    void set_i_timer_service(std::shared_ptr<i_timer_service> timer_man, client_setup_access_key) { global_timer_manager = timer_man; }
     void set_udp(std::shared_ptr<i_udp_for_session_control> udp_ptr_, client_setup_access_key)
     {
         udp_ptr = udp_ptr_;

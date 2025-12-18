@@ -9,6 +9,7 @@
 #include <vector>
 #include <memory>
 #include <chrono>
+#include <atomic>
 
 template <typename K, typename V, typename H = std::hash<K>>
 class thread_safe_unordered_map
@@ -17,23 +18,37 @@ private:
     struct Bucket
     {
         std::unordered_map<K, V, H> map;
-        mutable std::shared_mutex mutex; // protects map
-        std::mutex cv_mutex;             // ONLY for condition_variable
-        std::condition_variable cv;
+        mutable std::shared_mutex mutex;
     };
 
     static constexpr size_t num_shards = 8;
     std::vector<std::unique_ptr<Bucket>> shards_;
     H hasher_;
 
+    // GLOBAL CV (required for correctness)
+    mutable std::mutex cv_mutex_;
+    mutable std::condition_variable cv_;
+
     Bucket &get_bucket(const K &key) const
     {
         return *shards_[hasher_(key) % num_shards];
     }
 
+    bool has_any_data() const
+    {
+        for (const auto &b : shards_)
+        {
+            std::shared_lock<std::shared_mutex> lock(b->mutex);
+            if (!b->map.empty())
+                return true;
+        }
+        return false;
+    }
+
 public:
     thread_safe_unordered_map()
     {
+        shards_.reserve(num_shards);
         for (size_t i = 0; i < num_shards; ++i)
             shards_.emplace_back(std::make_unique<Bucket>());
     }
@@ -47,12 +62,9 @@ public:
         auto &bucket = get_bucket(key);
         {
             std::unique_lock<std::shared_mutex> lock(bucket.mutex);
-            auto [_, inserted] =
-                bucket.map.insert_or_assign(key, std::move(value));
-            if (!inserted)
-                return false;
+            bucket.map.insert_or_assign(key, std::move(value));
         }
-        bucket.cv.notify_all();
+        cv_.notify_one();
         return true;
     }
 
@@ -86,15 +98,14 @@ public:
     // WRITE (non-blocking)
     std::optional<std::pair<K, V>> try_pop()
     {
-        for (size_t i = 0; i < num_shards; ++i)
+        for (auto &b : shards_)
         {
-            auto &bucket = *shards_[i];
-            std::unique_lock<std::shared_mutex> lock(bucket.mutex, std::try_to_lock);
-            if (lock.owns_lock() && !bucket.map.empty())
+            std::unique_lock<std::shared_mutex> lock(b->mutex, std::try_to_lock);
+            if (lock.owns_lock() && !b->map.empty())
             {
-                auto it = bucket.map.begin();
+                auto it = b->map.begin();
                 std::pair<K, V> result(it->first, std::move(it->second));
-                bucket.map.erase(it);
+                b->map.erase(it);
                 return result;
             }
         }
@@ -106,23 +117,14 @@ public:
     {
         while (true)
         {
-            for (size_t i = 0; i < num_shards; ++i)
-            {
-                auto &bucket = *shards_[i];
-                std::unique_lock<std::shared_mutex> lock(bucket.mutex, std::try_to_lock);
-                if (lock.owns_lock() && !bucket.map.empty())
-                {
-                    auto it = bucket.map.begin();
-                    std::pair<K, V> result(it->first, std::move(it->second));
-                    bucket.map.erase(it);
-                    return result;
-                }
-            }
+            // Fast path
+            if (auto v = try_pop())
+                return std::move(*v);
 
-            // sleep
-            auto &b = *shards_[0];
-            std::unique_lock<std::mutex> cv_lock(b.cv_mutex);
-            b.cv.wait_for(cv_lock, std::chrono::milliseconds(1));
+            // Proper blocking wait
+            std::unique_lock<std::mutex> lk(cv_mutex_);
+            cv_.wait(lk, [this]
+                     { return has_any_data(); });
         }
     }
 

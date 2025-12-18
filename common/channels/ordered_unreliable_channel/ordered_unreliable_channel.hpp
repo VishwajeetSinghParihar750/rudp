@@ -20,7 +20,7 @@
 #include <stdexcept>
 #include <string>
 
-class timer_manager;
+class i_timer_service;
 
 namespace ordered_unreliable_channel
 {
@@ -347,7 +347,7 @@ namespace ordered_unreliable_channel
             LOG_TEST("[ordered_unreliable_channel::set_on_net_data_ready] on_net_data_ready callback set.");
         }
 
-        void set_timer_manager(std::shared_ptr<timer_manager> timer_man) override
+        void set_timer_service(std::shared_ptr<i_timer_service> timer_man) override
         {
             LOG_INFO("[ordered_unreliable_channel::set_timer_manager] Timer manager not needed for unordered unreliable channel.");
         }

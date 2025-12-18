@@ -7,7 +7,7 @@
 #include <vector>
 
 #include "../common/transport_addr.hpp"
-#include "../common/timer_manager.hpp"
+#include "../common/i_timer_service.hpp"
 #include "../common/timer_info.hpp"
 #include "../common/thread_safe_unordered_map.hpp"
 #include "../common/rudp_protocol_packet.hpp"
@@ -89,9 +89,9 @@ struct connection_state_machine : public std::enable_shared_from_this<connection
     std::atomic<CONNECTION_STATE> current_state = CONNECTION_STATE::LISTEN;
 
     std::function<void(uint8_t)> on_send_control_packet_to_transport;
-    std::shared_ptr<timer_manager> global_timer_manager;
+    std::shared_ptr<i_timer_service> global_timer_manager;
 
-    connection_state_machine(std::function<void(uint8_t)> f, std::shared_ptr<timer_manager> timer_man)
+    connection_state_machine(std::function<void(uint8_t)> f, std::shared_ptr<i_timer_service> timer_man)
         : current_state(CONNECTION_STATE::LISTEN), on_send_control_packet_to_transport(f), global_timer_manager(timer_man)
     {
         LOG_INFO("[connection_state_machine::connection_state_machine] FSM created, state: LISTEN");
@@ -340,7 +340,7 @@ class session_control : public i_session_control_for_udp, public i_session_contr
 {
     std::atomic<bool> server_closed = false;
 
-    std::shared_ptr<timer_manager> global_timer_manager;
+    std::shared_ptr<i_timer_service> global_timer_manager;
     std::shared_ptr<i_udp_for_session_control> udp_ptr;
     std::weak_ptr<i_channel_manager_for_session_control> channel_manager_ptr;
     thread_safe_unordered_map<transport_addr, client_id, transport_addr_hasher> clients_addr_to_id;
@@ -425,8 +425,11 @@ class session_control : public i_session_control_for_udp, public i_session_contr
     {
         uint8_t flags = *reinterpret_cast<const uint8_t *>(incoming_pkt.get_const_buffer() + rudp_protocol_packet::SESSION_CONTROL_HEADER_OFFSET);
 
+        const char *buf =
+            incoming_pkt.get_const_buffer() + rudp_protocol_packet::SESSION_CONTROL_HEADER_OFFSET;
+
         uint32_t reserved_net;
-        memcpy(&reserved_net, incoming_pkt.get_const_buffer() + rudp_protocol_packet::SESSION_CONTROL_HEADER_OFFSET + sizeof(flags), sizeof(reserved_net));
+        std::memcpy(&reserved_net, buf + sizeof(flags), sizeof(reserved_net));
         uint32_t reserved = ntohl(reserved_net);
 
         uint8_t control_flags = flags & ((uint8_t(1) << 4) - 1);
@@ -552,7 +555,7 @@ public:
         server_setup_access_key() {}
     };
 
-    void set_timer_manager(std::shared_ptr<timer_manager> timer_man, server_setup_access_key)
+    void set_i_timer_service(std::shared_ptr<i_timer_service> timer_man, server_setup_access_key)
     {
         global_timer_manager = timer_man;
         LOG_INFO("Session Control: Timer Manager set.");

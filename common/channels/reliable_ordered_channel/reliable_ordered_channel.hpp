@@ -4,7 +4,7 @@
 #include "../../rudp_protocol_packet.hpp"
 #include "../../types.hpp"
 #include "../../timer_info.hpp"
-#include "../../timer_manager.hpp"
+#include "../../i_timer_service.hpp"
 #include "../../logger.hpp"
 
 #include <map>
@@ -72,12 +72,23 @@ namespace reliable_ordered_channel
                 LOG_WARN("[packet_codec::deserialize_header] Failed to deserialize header: Total size too small (" << total_size << ")");
                 return false;
             }
+            uint32_t seq_no_net;
+            uint32_t ack_no_net;
+            uint16_t win_sz_net;
+            uint16_t flags_net;
+            uint16_t checksum_net;
 
-            out_header.seq_no = ntohl(*reinterpret_cast<const uint32_t *>(buf + 0));
-            out_header.ack_no = ntohl(*reinterpret_cast<const uint32_t *>(buf + 4));
-            out_header.win_sz = ntohs(*reinterpret_cast<const uint16_t *>(buf + 8));
-            out_header.flags = ntohs(*reinterpret_cast<const uint16_t *>(buf + 10));
-            out_header.checksum = ntohs(*reinterpret_cast<const uint16_t *>(buf + 12));
+            std::memcpy(&seq_no_net, buf + 0, sizeof(seq_no_net));
+            std::memcpy(&ack_no_net, buf + 4, sizeof(ack_no_net));
+            std::memcpy(&win_sz_net, buf + 8, sizeof(win_sz_net));
+            std::memcpy(&flags_net, buf + 10, sizeof(flags_net));
+            std::memcpy(&checksum_net, buf + 12, sizeof(checksum_net));
+
+            out_header.seq_no = ntohl(seq_no_net);
+            out_header.ack_no = ntohl(ack_no_net);
+            out_header.win_sz = ntohs(win_sz_net);
+            out_header.flags = ntohs(flags_net);
+            out_header.checksum = ntohs(checksum_net);
 
             if (!verify_checksum(buf, total_size, out_header.checksum))
             {
@@ -93,7 +104,7 @@ namespace reliable_ordered_channel
             uint32_t ack = htonl(header.ack_no);
             uint16_t win = htons(header.win_sz);
             uint16_t flg = htons(header.flags);
-            uint16_t zero = 0; 
+            uint16_t zero = 0;
 
             memcpy(buf + 0, &seq, 4);
             memcpy(buf + 4, &ack, 4);
@@ -122,7 +133,7 @@ namespace reliable_ordered_channel
 
             for (uint32_t i = 0; i < channel_config::HEADER_SIZE; i += 2)
             {
-                if (i == 12) 
+                if (i == 12)
                     continue;
                 uint16_t val = (static_cast<uint8_t>(buf[i]) << 8) | static_cast<uint8_t>(buf[i + 1]);
                 sum += val;
@@ -345,12 +356,12 @@ namespace reliable_ordered_channel
             LOG_TEST("[receive_window::receive_packet] Received packet: Seq=" << out_header.seq_no << ", Ack=" << out_header.ack_no << ", Win=" << out_header.win_sz << ", PayloadLen=" << payload_len);
 
             if (payload_len == 0 && (out_header.flags & static_cast<uint16_t>(channel_flags::ACK)) == 0)
-                return true; 
+                return true;
 
             std::lock_guard<std::mutex> guard(lock);
 
             if (payload_len == 0)
-                return true; 
+                return true;
 
             const char *payload = packet + channel_config::HEADER_SIZE;
             uint32_t seg_start = out_header.seq_no;
@@ -392,7 +403,7 @@ namespace reliable_ordered_channel
                 }
                 ack_pending.store(true, std::memory_order_release);
             }
-            else 
+            else
             {
                 if (seg_end > current_rcv_nxt)
                 {
@@ -513,7 +524,7 @@ namespace reliable_ordered_channel
             uint32_t total_capacity = buffer.capacity();
 
             uint32_t buffered = (current_write - current_una);
-            uint32_t available = (total_capacity - 1) - buffered; 
+            uint32_t available = (total_capacity - 1) - buffered;
 
             if (available < len)
             {
@@ -528,7 +539,7 @@ namespace reliable_ordered_channel
             return static_cast<ssize_t>(len);
         }
 
-        uint32_t get_packet_to_send(char *out_buf, uint32_t max_payload, uint32_t &out_seq_no)
+        uint32_t get_packet_to_send(char *out_buf, uint32_t &out_seq_no)
         {
             inflight_segment seg;
             if (retransmissions.get_retransmit_segment(seg))
@@ -542,7 +553,7 @@ namespace reliable_ordered_channel
             uint32_t current_nxt = snd_nxt.get();
             uint32_t current_write = write_pos.get();
             uint32_t current_una = snd_una.get();
-            uint32_t available_to_send = current_write - current_nxt; 
+            uint32_t available_to_send = current_write - current_nxt;
             uint32_t in_flight = current_nxt - current_una;
             uint16_t remote_win = flow.get_remote_window();
 
@@ -641,14 +652,14 @@ namespace reliable_ordered_channel
         send_window snd_window;
         receive_window rcv_window;
         flag_manager flags;
-        mutable std::mutex mutex_; 
+        mutable std::mutex mutex_;
         std::function<void()> on_app_data_ready;
         std::function<void(std::unique_ptr<rudp_protocol_packet>)> on_net_data_ready;
 
-        std::shared_ptr<timer_manager> global_timer_manager;
+        std::shared_ptr<i_timer_service> global_timer_manager;
 
-        static constexpr uint64_t KEEPALIVE_INTERVAL_MS = 30000; 
-        static constexpr uint64_t DELAYED_ACK_MS = 40;           
+        static constexpr uint64_t KEEPALIVE_INTERVAL_MS = 30000;
+        static constexpr uint64_t DELAYED_ACK_MS = 40;
 
         void on_rto_expire()
         {
@@ -688,7 +699,7 @@ namespace reliable_ordered_channel
 
         void schedule_rto_timer()
         {
-            std::shared_ptr<timer_manager> timer_mgr;
+            std::shared_ptr<i_timer_service> timer_mgr;
             {
                 std::lock_guard<std::mutex> guard(mutex_);
                 timer_mgr = global_timer_manager;
@@ -710,14 +721,15 @@ namespace reliable_ordered_channel
                 }
                 self->on_rto_expire();
             };
-            auto timer = std::make_unique<timer_info>(duration_ms(channel_config::RTO_MS), cb);
+
+            auto timer = std::make_shared<timer_info>(duration_ms(channel_config::RTO_MS), cb);
             timer_mgr->add_timer(std::move(timer));
             LOG_TEST("RTO timer scheduled for " << channel_config::RTO_MS << "ms.");
         }
 
         void schedule_delayed_ack_timer()
         {
-            std::shared_ptr<timer_manager> timer_mgr;
+            std::shared_ptr<i_timer_service> timer_mgr;
             {
                 std::lock_guard<std::mutex> guard(mutex_);
                 timer_mgr = global_timer_manager;
@@ -739,7 +751,7 @@ namespace reliable_ordered_channel
                 }
                 self->on_delayed_ack_expire();
             };
-            auto timer = std::make_unique<timer_info>(duration_ms(DELAYED_ACK_MS), cb);
+            auto timer = std::make_shared<timer_info>(duration_ms(DELAYED_ACK_MS), cb);
             timer_mgr->add_timer(std::move(timer));
             LOG_TEST("Delayed ACK timer scheduled for " << DELAYED_ACK_MS << "ms.");
         }
@@ -748,8 +760,7 @@ namespace reliable_ordered_channel
         {
             uint32_t seq_no = 0;
             char payload_buf[channel_config::MAX_MSS];
-            uint32_t max_payload = channel_config::MAX_MSS;
-            uint32_t payload_len = snd_window.get_packet_to_send(payload_buf, max_payload, seq_no);
+            uint32_t payload_len = snd_window.get_packet_to_send(payload_buf, seq_no);
 
             bool send_ack = flags.get_send_ack() || rcv_window.is_ack_pending();
             bool send_window = flags.get_send_window();
@@ -790,12 +801,7 @@ namespace reliable_ordered_channel
 
             rcv_window.clear_ack_pending();
 
-            LOG_INFO("Sending packet: Seq=" << seq_no <<
-                     ", Ack=" << header.ack_no <<
-                     ", Win=" << header.win_sz <<
-                     (payload_len > 0 ? ", Payload=" + std::to_string(payload_len) + " bytes (Data)" : "") <<
-                     (send_ack ? " (ACK)" : "") <<
-                     (send_window ? " (WIND_SZ)" : ""));
+            LOG_INFO("Sending packet: Seq=" << seq_no << ", Ack=" << header.ack_no << ", Win=" << header.win_sz << (payload_len > 0 ? ", Payload=" + std::to_string(payload_len) + " bytes (Data)" : "") << (send_ack ? " (ACK)" : "") << (send_window ? " (WIND_SZ)" : ""));
 
             return packet;
         }
@@ -942,7 +948,7 @@ namespace reliable_ordered_channel
             LOG_TEST("on_net_data_ready callback set.");
         }
 
-        void set_timer_manager(std::shared_ptr<timer_manager> timer_man) override
+        void set_timer_service(std::shared_ptr<i_timer_service> timer_man) override
         {
             std::lock_guard<std::mutex> guard(mutex_);
             global_timer_manager = timer_man;

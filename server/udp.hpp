@@ -1,265 +1,262 @@
 #pragma once
 
 #include <sys/socket.h>
+#include <sys/epoll.h>
+#include <sys/eventfd.h>
+#include <sys/ioctl.h>
 #include <netdb.h>
-#include <cassert>
-#include <stdlib.h>
 #include <unistd.h>
 #include <fcntl.h>
-#include <memory>
-#include <thread>
-#include <sys/epoll.h>
-#include <iostream>
-#include <sys/socket.h>
-#include <sys/ioctl.h>
-#include <cerrno>
 #include <cstring>
+#include <cassert>
+#include <thread>
+#include <memory>
 
 #include "../common/rudp_protocol_packet.hpp"
 #include "../common/logger.hpp"
 #include "../common/transport_addr.hpp"
+#include "../common/timer_manager.hpp"
+#include "../common/i_timer_service.hpp"
 
 #include "i_udp_for_session_control.hpp"
 #include "i_session_control_for_udp.hpp"
 
 class i_server;
 
-class udp : public i_udp_for_session_control
+class udp : public i_udp_for_session_control, public i_timer_service
 {
     std::weak_ptr<i_session_control_for_udp> session_control_;
+    std::shared_ptr<timer_manager> timers_;
 
     int socket_fd = -1;
     int epoll_fd = -1;
+    int wake_fd = -1;
+
     std::jthread io_thread;
 
-    void set_non_blocking(int fd)
+    static void set_non_blocking(int fd)
     {
         int flags = fcntl(fd, F_GETFL, 0);
         if (flags == -1)
         {
-            LOG_ERROR("[set_non_blocking] fcntl(F_GETFL) failed: " << strerror(errno));
+            LOG_CRITICAL("[set_non_blocking] fcntl(F_GETFL) failed: "
+                         << strerror(errno));
             assert(false);
         }
-        flags |= O_NONBLOCK;
-        if (fcntl(fd, F_SETFL, flags) == -1)
+
+        if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) == -1)
         {
-            LOG_ERROR("[set_non_blocking] fcntl(F_SETFL, O_NONBLOCK) failed: " << strerror(errno));
+            LOG_CRITICAL("[set_non_blocking] fcntl(F_SETFL) failed: "
+                         << strerror(errno));
             assert(false);
         }
-        LOG_INFO("[set_non_blocking] Socket " << fd << " set to non-blocking.");
+
+        LOG_INFO("[set_non_blocking] FD " << fd << " set to non-blocking.");
     }
 
-    void initialize_socket(const char *PORT)
+    void setup_socket(const char *PORT)
     {
-        LOG_INFO("[initialize_socket] Initializing UDP socket on port " << PORT);
-        addrinfo hints{};
-        addrinfo *results = nullptr;
+        LOG_INFO("[setup_socket] Initializing UDP socket on port " << PORT);
 
+        addrinfo hints{}, *res = nullptr;
         hints.ai_family = AF_UNSPEC;
         hints.ai_socktype = SOCK_DGRAM;
         hints.ai_flags = AI_PASSIVE;
 
-        int res = getaddrinfo(NULL, PORT, &hints, &results);
-        if (res != 0)
+        int rc = getaddrinfo(nullptr, PORT, &hints, &res);
+        if (rc != 0)
         {
-            LOG_CRITICAL("[initialize_socket] getaddrinfo failed: " << gai_strerror(res));
+            LOG_CRITICAL("[setup_socket] getaddrinfo failed: "
+                         << gai_strerror(rc));
             assert(false);
         }
 
-        for (addrinfo *p = results; p != nullptr; p = p->ai_next)
+        for (addrinfo *p = res; p; p = p->ai_next)
         {
             socket_fd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
-            if (socket_fd == -1)
+            if (socket_fd < 0)
             {
-                LOG_WARN("[initialize_socket] Failed to create socket: " << strerror(errno));
+                LOG_WARN("[setup_socket] socket() failed: "
+                         << strerror(errno));
                 continue;
             }
 
             set_non_blocking(socket_fd);
 
-            int optval = 1;
-            int sopres = setsockopt(socket_fd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
-            if (sopres == -1)
+            int one = 1;
+            if (setsockopt(socket_fd,
+                           SOL_SOCKET,
+                           SO_REUSEADDR,
+                           &one,
+                           sizeof(one)) == -1)
             {
-                LOG_ERROR("[initialize_socket] setsockopt(SO_REUSEADDR) failed: " << strerror(errno));
-                close(socket_fd);
-                socket_fd = -1;
-                continue;
+                LOG_ERROR("[setup_socket] setsockopt(SO_REUSEADDR) failed: "
+                          << strerror(errno));
             }
 
-            int res_ = bind(socket_fd, p->ai_addr, p->ai_addrlen);
-
-            if (res_ == 0)
+            if (bind(socket_fd, p->ai_addr, p->ai_addrlen) == 0)
             {
-                LOG_INFO("[initialize_socket] Successfully bound socket.");
+                LOG_INFO("[setup_socket] Successfully bound UDP socket.");
                 break;
             }
 
-            LOG_WARN("[initialize_socket] Failed to bind socket: " << strerror(errno));
+            LOG_WARN("[setup_socket] bind() failed: "
+                     << strerror(errno));
+
             close(socket_fd);
             socket_fd = -1;
         }
 
-        freeaddrinfo(results);
+        freeaddrinfo(res);
 
         if (socket_fd == -1)
         {
-            LOG_CRITICAL("[initialize_socket] Failed to initialize UDP socket.");
+            LOG_CRITICAL("[setup_socket] Failed to bind UDP socket.");
+            assert(false);
         }
-        assert(socket_fd != -1);
     }
 
     void setup_epoll()
     {
         LOG_INFO("[setup_epoll] Setting up epoll.");
-        epoll_event event;
 
         epoll_fd = epoll_create1(0);
-
         if (epoll_fd == -1)
         {
-            LOG_CRITICAL("[setup_epoll] epoll_create1 failed: " << strerror(errno));
+            LOG_CRITICAL("[setup_epoll] epoll_create1 failed: "
+                         << strerror(errno));
+            assert(false);
         }
-        assert(epoll_fd != -1);
 
-        event.data.fd = socket_fd;
-        event.events = EPOLLIN;
-
-        int epoll_ctl_rv = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, socket_fd, &event);
-
-        if (epoll_ctl_rv == -1)
+        wake_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+        if (wake_fd == -1)
         {
-            LOG_CRITICAL("[setup_epoll] epoll_ctl failed to add socket_fd: " << strerror(errno));
+            LOG_CRITICAL("[setup_epoll] eventfd failed: "
+                         << strerror(errno));
+            assert(false);
         }
-        assert(epoll_ctl_rv == 0);
-        LOG_INFO("[setup_epoll] UDP socket added to epoll instance.");
+
+        epoll_event ev{};
+        ev.events = EPOLLIN;
+
+        ev.data.fd = socket_fd;
+        if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, socket_fd, &ev) == -1)
+        {
+            LOG_CRITICAL("[setup_epoll] epoll_ctl add socket_fd failed: "
+                         << strerror(errno));
+            assert(false);
+        }
+
+        ev.data.fd = wake_fd;
+        if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, wake_fd, &ev) == -1)
+        {
+            LOG_CRITICAL("[setup_epoll] epoll_ctl add wake_fd failed: "
+                         << strerror(errno));
+            assert(false);
+        }
+
+        LOG_INFO("[setup_epoll] Epoll setup complete.");
     }
 
-    void event_loop(std::stop_token token)
+    void event_loop(std::stop_token st)
     {
-        LOG_INFO("[event_loop] UDP I/O thread started.");
-        print_listener_info();
+        LOG_INFO("[event_loop] UDP server I/O thread started.");
 
-        constexpr int MAX_EVENTS = 2048;
+        constexpr int MAX_EVENTS = 1024;
         epoll_event events[MAX_EVENTS];
-        std::shared_ptr<i_session_control_for_udp> session_control_sp;
 
-        int event_cnt = 0;
-        while (!token.stop_requested())
+        while (!st.stop_requested())
         {
-            event_cnt = epoll_wait(epoll_fd, events, MAX_EVENTS, 100);
+            duration_ms timeout =
+                timers_->next_timeout(duration_ms(5000));
 
-            if (token.stop_requested())
-                break;
+            int n = epoll_wait(epoll_fd,
+                               events,
+                               MAX_EVENTS,
+                               timeout.count());
 
-            if (event_cnt == -1)
+            if (n == -1)
             {
                 if (errno != EINTR)
                 {
-                    LOG_ERROR("[event_loop] epoll_wait error: " << strerror(errno));
+                    LOG_ERROR("[event_loop] epoll_wait failed: "
+                              << strerror(errno));
                 }
                 continue;
             }
 
-            for (auto ind = 0; ind < event_cnt; ind++)
+            for (int i = 0; i < n; ++i)
             {
-                int current_fd = events[ind].data.fd;
-                if (current_fd == socket_fd && (events[ind].events & EPOLLIN))
+                int fd = events[i].data.fd;
+
+                if (fd == socket_fd)
                 {
-                    size_t bytes_avail = 0;
-
-                    if (ioctl(socket_fd, FIONREAD, &bytes_avail) == -1)
-                    {
-                        LOG_ERROR("[event_loop] ioctl(FIONREAD) failed: " << strerror(errno));
-                        continue;
-                    }
-
-                    if (bytes_avail == 0)
-                    {
-                        LOG_WARN("[event_loop] Received EPOLLIN but FIONREAD reported 0 bytes available.");
-                        continue;
-                    }
-
-                    std::unique_ptr<rudp_protocol_packet> pkt = std::make_unique<rudp_protocol_packet>(bytes_avail);
-                    std::unique_ptr<transport_addr> addr = std::make_unique<transport_addr>();
-
-                    int n = recvfrom(socket_fd, pkt->get_buffer(), pkt->get_capacity(), 0, addr->get_mutable_sockaddr(), addr->get_mutable_socklen());
-
-                    if (n > 0)
-                    {
-                        pkt->set_length(n);
-                        session_control_sp = session_control_.lock();
-                        if (session_control_sp != nullptr)
-                        {
-                            LOG_TEST("[event_loop] Received " << n << " bytes from " << addr->to_string() << ". Forwarding to Session Control.");
-                            session_control_sp->on_transport_receive(std::move(pkt), std::move(addr));
-                        }
-                        else
-                        {
-                            LOG_WARN("[event_loop] Received packet, but Session Control weak pointer expired.");
-                        }
-                    }
-                    else if (n == -1)
-                    {
-                        if (errno != EAGAIN && errno != EWOULDBLOCK)
-                        {
-                            LOG_ERROR("[event_loop] recvfrom failed: " << strerror(errno));
-                        }
-                        else
-                        {
-                            LOG_TEST("[event_loop] recvfrom returned EAGAIN/EWOULDBLOCK (expected for non-blocking).");
-                        }
-                    }
+                    handle_udp();
                 }
-                else
+                else if (fd == wake_fd)
                 {
-                    LOG_ERROR("[event_loop] Epoll event on unexpected fd/event: fd=" << current_fd << ", events=" << events[ind].events);
+                    uint64_t v;
+                    int _ = read(wake_fd, &v, sizeof(v)); // drain
                 }
             }
+
+            // Always process timers after wakeup
+            timers_->process_expired();
         }
-        LOG_INFO("[event_loop] UDP I/O thread stopping.");
+
+        LOG_INFO("[event_loop] UDP server I/O thread stopping.");
     }
 
-    void print_listener_info()
+    void handle_udp()
     {
-        assert(socket_fd != -1);
-
-        char host_str[NI_MAXHOST];
-        char port_str[NI_MAXSERV];
-
-        sockaddr_storage local_addr_storage;
-        socklen_t local_addr_len = sizeof(local_addr_storage);
-
-        int gs_res = getsockname(socket_fd,
-                                 reinterpret_cast<sockaddr *>(&local_addr_storage),
-                                 &local_addr_len);
-
-        if (gs_res != 0)
+        size_t avail = 0;
+        if (ioctl(socket_fd, FIONREAD, &avail) == -1)
         {
-            LOG_ERROR("[print_listener_info] getsockname failed: " << strerror(errno));
+            LOG_ERROR("[handle_udp] ioctl(FIONREAD) failed: "
+                      << strerror(errno));
+            return;
         }
-        assert(gs_res == 0);
 
-        int gn_res = getnameinfo(reinterpret_cast<sockaddr *>(&local_addr_storage),
-                                 local_addr_len,
-                                 host_str, sizeof(host_str),
-                                 port_str, sizeof(port_str),
-                                 NI_NUMERICHOST | NI_NUMERICSERV);
-
-        if (gn_res == 0)
+        if (avail == 0)
         {
-            if (local_addr_storage.ss_family == AF_INET6)
+            LOG_WARN("[handle_udp] EPOLLIN but no data available.");
+            return;
+        }
+
+        auto pkt = std::make_unique<rudp_protocol_packet>(avail);
+        auto addr = std::make_unique<transport_addr>();
+
+        ssize_t n = recvfrom(socket_fd,
+                             pkt->get_buffer(),
+                             pkt->get_capacity(),
+                             0,
+                             addr->get_mutable_sockaddr(),
+                             addr->get_mutable_socklen());
+
+        if (n <= 0)
+        {
+            if (errno != EAGAIN && errno != EWOULDBLOCK)
             {
-                LOG_CRITICAL("UDP Listener started on [" << host_str << "]:" << port_str << " (IPv6)");
+                LOG_ERROR("[handle_udp] recvfrom failed: "
+                          << strerror(errno));
             }
-            else
-            {
-                LOG_CRITICAL("UDP Listener started on " << host_str << ":" << port_str << " (IPv4)");
-            }
+            return;
+        }
+
+        pkt->set_length(n);
+
+        LOG_TEST("[handle_udp] Received "
+                 << n << " bytes from "
+                 << addr->to_string());
+
+        if (auto sc = session_control_.lock())
+        {
+            sc->on_transport_receive(std::move(pkt),
+                                     std::move(addr));
         }
         else
         {
-            LOG_WARN("Could not resolve socket name for printing: " << gai_strerror(gn_res));
+            LOG_WARN("[handle_udp] Session control expired.");
         }
     }
 
@@ -267,61 +264,80 @@ public:
     class server_setup_access_key
     {
         friend std::shared_ptr<i_server> create_server(const char *);
-
-    private:
         server_setup_access_key() {}
     };
 
-    udp(const char *PORT)
+    udp(const char *PORT,
+        std::shared_ptr<timer_manager> tm)
+        : timers_(std::move(tm))
     {
-        initialize_socket(PORT);
+        assert(timers_);
+
+        setup_socket(PORT);
         setup_epoll();
-        io_thread = std::jthread([this](std::stop_token token)
-                                 { this->event_loop(std::move(token)); });
+
+        io_thread = std::jthread(
+            [this](std::stop_token st)
+            { event_loop(st); });
     }
 
     ~udp()
     {
-        LOG_CRITICAL("UDP destructor called. Closing socket and epoll fd.");
+        LOG_INFO("UDP server destructor: closing resources.");
 
         if (socket_fd != -1)
-        {
             close(socket_fd);
-            LOG_INFO("Socket " << socket_fd << " closed.");
-        }
+        if (wake_fd != -1)
+            close(wake_fd);
         if (epoll_fd != -1)
-        {
             close(epoll_fd);
-            LOG_INFO("Epoll FD " << epoll_fd << " closed.");
+    }
+
+    // i_timer_service
+    void add_timer(timer_info_ptr t) override
+    {
+        bool earlier = timers_->add_timer(std::move(t));
+        if (earlier)
+        {
+            uint64_t one = 1;
+            int _ = write(wake_fd, &one, sizeof(one));
         }
     }
 
-    ssize_t send_packet_to_network(const transport_addr &addr, const char *buf, const size_t &len) override
+    ssize_t send_packet_to_network(const transport_addr &addr,
+                                   const char *buf,
+                                   const size_t &len) override
     {
-        ssize_t sent_bytes = sendto(
-            socket_fd,
-            buf, len,
-            0,
-            addr.get_sockaddr(), *addr.get_socklen());
+        ssize_t sent = sendto(socket_fd,
+                              buf,
+                              len,
+                              0,
+                              addr.get_sockaddr(),
+                              *addr.get_socklen());
 
-        if (sent_bytes == -1)
+        if (sent == -1)
         {
             if (errno != EAGAIN && errno != EWOULDBLOCK)
             {
-                LOG_ERROR("sendto failed to " << addr.to_string() << ": " << strerror(errno));
+                LOG_ERROR("[send_packet] sendto failed to "
+                          << addr.to_string()
+                          << ": " << strerror(errno));
             }
         }
         else
         {
-            LOG_TEST("Sent " << sent_bytes << " bytes to " << addr.to_string());
+            LOG_TEST("[send_packet] Sent "
+                     << sent << " bytes to "
+                     << addr.to_string());
         }
 
-        return sent_bytes;
+        return sent;
     }
 
-    void set_sesion_control(std::weak_ptr<i_session_control_for_udp> cm, server_setup_access_key)
+    void set_sesion_control(std::weak_ptr<i_session_control_for_udp> sc,
+                            server_setup_access_key)
     {
-        session_control_ = cm;
-        LOG_INFO("Session Control weak pointer set.");
+        session_control_ = sc;
+        LOG_INFO("Session control weak pointer set in UDP server.");
     }
 };

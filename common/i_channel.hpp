@@ -4,13 +4,15 @@
 #include <functional>
 
 class rudp_protocol_packet;
-class timer_manager;
+class i_timer_service;
 class rudp_protocol_packet;
 
 class i_channel
 {
 
 public:
+    virtual ~i_channel() = default;
+
     virtual std::unique_ptr<i_channel> clone() const = 0;
 
     // recieve from client what came on udp
@@ -28,5 +30,5 @@ public:
     virtual void set_on_net_data_ready(std::function<void(std::unique_ptr<rudp_protocol_packet>)>) = 0;
 
     // Timer-related API
-    virtual void set_timer_manager(std::shared_ptr<timer_manager>) = 0;
+    virtual void set_timer_service(std::shared_ptr<i_timer_service>) = 0;
 };

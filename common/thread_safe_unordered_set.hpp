@@ -22,19 +22,32 @@ private:
 
     static constexpr size_t num_shards = 16;
     std::vector<std::unique_ptr<Bucket>> shards_;
-
-    std::condition_variable cv_; // standard CV
-    std::mutex cv_mtx_;          // mutex ONLY for cv
     H hasher_;
+
+    // GLOBAL CV (required for correctness)
+    mutable std::mutex cv_mutex_;
+    mutable std::condition_variable cv_;
 
     Bucket &get_bucket(const T &value) const
     {
         return *shards_[hasher_(value) % num_shards];
     }
 
+    bool has_any_data() const
+    {
+        for (const auto &b : shards_)
+        {
+            std::shared_lock<std::shared_mutex> lock(b->mutex);
+            if (!b->set.empty())
+                return true;
+        }
+        return false;
+    }
+
 public:
     thread_safe_unordered_set()
     {
+        shards_.reserve(num_shards);
         for (size_t i = 0; i < num_shards; ++i)
             shards_.emplace_back(std::make_unique<Bucket>());
     }
@@ -52,7 +65,7 @@ public:
             if (!inserted)
                 return false;
         }
-        cv_.notify_all();
+        cv_.notify_one();
         return true;
     }
 
@@ -75,15 +88,14 @@ public:
     // WRITE (non-blocking)
     std::optional<T> try_pop()
     {
-        for (size_t i = 0; i < num_shards; ++i)
+        for (auto &b : shards_)
         {
-            auto &bucket = *shards_[i];
-            std::unique_lock<std::shared_mutex> lock(bucket.mutex, std::try_to_lock);
-            if (lock.owns_lock() && !bucket.set.empty())
+            std::unique_lock<std::shared_mutex> lock(b->mutex, std::try_to_lock);
+            if (lock.owns_lock() && !b->set.empty())
             {
-                auto it = bucket.set.begin();
+                auto it = b->set.begin();
                 T val = *it;
-                bucket.set.erase(it);
+                b->set.erase(it);
                 return val;
             }
         }
@@ -95,22 +107,12 @@ public:
     {
         while (true)
         {
-            for (size_t i = 0; i < num_shards; ++i)
-            {
-                auto &bucket = *shards_[i];
-                std::unique_lock<std::shared_mutex> lock(bucket.mutex, std::try_to_lock);
-                if (lock.owns_lock() && !bucket.set.empty())
-                {
-                    auto it = bucket.set.begin();
-                    T val = *it;
-                    bucket.set.erase(it);
-                    return val;
-                }
-            }
+            if (auto v = try_pop())
+                return std::move(*v);
 
-            // sleep
-            std::unique_lock<std::mutex> cv_lock(cv_mtx_);
-            cv_.wait_for(cv_lock, std::chrono::milliseconds(10));
+            std::unique_lock<std::mutex> lk(cv_mutex_);
+            cv_.wait(lk, [this]
+                     { return has_any_data(); });
         }
     }
 

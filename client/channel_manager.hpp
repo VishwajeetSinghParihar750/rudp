@@ -18,7 +18,7 @@
 #include "../common/thread_safe_unordered_map.hpp"
 #include "../common/i_channel.hpp"
 #include "../common/thread_safe_priority_queue.hpp"
-#include "../common/timer_manager.hpp"
+#include "../common/i_timer_service.hpp"
 #include "../common/logger.hpp"
 #include "../common/rudp_protocol_packet.hpp"
 #include "../common/channels/reliable_ordered_channel/reliable_ordered_channel.hpp"
@@ -64,7 +64,7 @@ class channel_manager : public i_client, public i_channel_manager_for_session_co
 
     thread_safe_priority_queue<rcv_ready_queue_info, std::vector<rcv_ready_queue_info>, std::greater<rcv_ready_queue_info>> ready_to_rcv_queue;
 
-    std::shared_ptr<timer_manager> global_timers_manager;
+    std::shared_ptr<i_timer_service> global_timers_manager;
     std::unordered_map<channel_id, channel_type> channels;
 
     thread_safe_unordered_map<channel_id, std::shared_ptr<i_channel>> active_channels;
@@ -122,7 +122,7 @@ class channel_manager : public i_client, public i_channel_manager_for_session_co
         {
             auto ch = std::make_shared<reliable_ordered_channel::reliable_ordered_channel>(ch_id);
 
-            ch->set_timer_manager(global_timers_manager);
+            ch->set_timer_service(global_timers_manager);
 
             std::weak_ptr<channel_manager> this_weak_ptr = shared_from_this();
             ch->set_on_app_data_ready(
@@ -154,7 +154,7 @@ class channel_manager : public i_client, public i_channel_manager_for_session_co
         {
             auto ch = std::make_shared<unordered_unreliable_channel::unordered_unreliable_channel>(ch_id);
 
-            ch->set_timer_manager(global_timers_manager);
+            ch->set_timer_service(global_timers_manager);
 
             std::weak_ptr<channel_manager> this_weak_ptr = shared_from_this();
             ch->set_on_app_data_ready(
@@ -185,7 +185,7 @@ class channel_manager : public i_client, public i_channel_manager_for_session_co
         {
             auto ch = std::make_shared<ordered_unreliable_channel::ordered_unreliable_channel>(ch_id);
 
-            ch->set_timer_manager(global_timers_manager);
+            ch->set_timer_service(global_timers_manager);
 
             std::weak_ptr<channel_manager> this_weak_ptr = shared_from_this();
             ch->set_on_app_data_ready(
@@ -229,7 +229,7 @@ class channel_manager : public i_client, public i_channel_manager_for_session_co
         LOG_INFO("Forwarded packet from channel " << ch_id << " to session control for transport send.");
     }
 
-    void set_timer_manager(std::shared_ptr<timer_manager> timer_man) { global_timers_manager = timer_man; }
+    void set_timer_service(std::shared_ptr<i_timer_service> timer_man) { global_timers_manager = timer_man; }
     void set_session_control(std::shared_ptr<i_session_control_for_channel_manager> ses_control)
     {
         session_control_ = ses_control;
@@ -418,7 +418,7 @@ public:
         }
     }
 
-    void set_timer_manager(std::shared_ptr<timer_manager> timer_man, client_setup_access_key) { global_timers_manager = timer_man; }
+    void set_timer_service(std::shared_ptr<i_timer_service> timer_man, client_setup_access_key) { global_timers_manager = timer_man; }
     void set_session_control(std::shared_ptr<i_session_control_for_channel_manager> ses_control, client_setup_access_key)
     {
         session_control_ = ses_control;

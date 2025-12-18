@@ -8,7 +8,7 @@ class i_session_control_for_channel_manager
 {
 
 public:
-    ~i_session_control_for_channel_manager() = default;
+    virtual ~i_session_control_for_channel_manager() = default;
 
     virtual void on_transport_send_data(std::unique_ptr<rudp_protocol_packet> pkt) = 0;
     virtual void on_close_client() = 0;
