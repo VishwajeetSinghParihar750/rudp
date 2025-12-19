@@ -21,10 +21,10 @@ public:
     rudp_protocol_packet() = default;
 
     rudp_protocol_packet(size_t n)
-        : length(0), capacity(n), mem(new char[n]) {}
+        : length(0), capacity(n), mem(static_cast<char *>(::operator new(n))) {}
 
     rudp_protocol_packet(size_t n, const char *buf)
-        : length(n), capacity(n), mem(new char[n])
+        : length(n), capacity(n), mem(static_cast<char *>(::operator new(n)))
     {
         std::copy(buf, buf + n, mem);
     }
@@ -71,7 +71,7 @@ public:
     ~rudp_protocol_packet() override
     {
         if (capacity > 0)
-            delete[] mem;
+            ::operator delete(mem);
     }
 
     rudp_protocol_packet(const rudp_protocol_packet &other)
