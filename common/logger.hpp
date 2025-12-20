@@ -9,10 +9,10 @@
 class logger
 {
     bool info_on = false;
-    bool error_on = false;
-    bool warning_on = false;
+    bool error_on = true;
+    bool warning_on = true;
     bool test_on = false;
-    bool critical_on = false;
+    bool critical_on = true;
     std::mutex log_mutex;
 
     logger() = default;

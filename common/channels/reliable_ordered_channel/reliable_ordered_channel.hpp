@@ -21,10 +21,30 @@
 
 namespace reliable_ordered_channel
 {
+    inline bool seq_lt(uint32_t a, uint32_t b)
+    {
+        return (int32_t)(a - b) < 0;
+    }
+
+    inline bool seq_le(uint32_t a, uint32_t b)
+    {
+        return (int32_t)(a - b) <= 0;
+    }
+
+    inline bool seq_gt(uint32_t a, uint32_t b)
+    {
+        return (int32_t)(a - b) > 0;
+    }
+
+    inline bool seq_ge(uint32_t a, uint32_t b)
+    {
+        return (int32_t)(a - b) >= 0;
+    }
+
     namespace channel_config
     {
         constexpr uint16_t HEADER_SIZE = 14;
-        constexpr uint32_t DEFAULT_BUFFER_SIZE = 1 * 1024 * 1024;
+        constexpr uint32_t DEFAULT_BUFFER_SIZE = 65335;
         constexpr uint16_t MAX_MSS = 32 * 1024;
         constexpr uint64_t RTO_MS = 200;
         constexpr uint32_t MAX_RETRANSMITS = 5;
@@ -137,6 +157,8 @@ namespace reliable_ordered_channel
         uint32_t app_read = 0;
         bool ack_pending = false;
 
+        uint32_t window_sz = 65535;
+
         std::map<uint32_t, std::vector<char>> ooo;
 
     public:
@@ -158,27 +180,28 @@ namespace reliable_ordered_channel
             }
 
             uint32_t start = h.seq_no;
-            uint32_t end = start + payload_len;
 
             /* STRICT RULE: no partial overlap allowed */
-            if (start < rcv_nxt)
+            if (seq_ge(start, rcv_nxt))
             {
-                ack_pending = true;
-                return true;
-            }
+                // ignore out of order packets if its looping , for simplicity in logic
 
-            if (start == rcv_nxt)
-            {
-                buffer.write_at(rcv_nxt, payload, payload_len);
-                rcv_nxt += payload_len;
-                ack_pending = true;
-                advance_sack();
-                return true;
-            }
+                uint32_t avail_space = channel_config::DEFAULT_BUFFER_SIZE - available();
 
-            /* Out-of-order but valid */
-            if (!ooo.count(start))
-                ooo[start] = std::vector<char>(payload, payload + payload_len);
+                if (avail_space >= payload_len)
+                {
+                    if (start == rcv_nxt)
+                    {
+                        buffer.write_at(rcv_nxt, payload, payload_len);
+                        rcv_nxt += payload_len;
+                        advance_sack();
+                    }
+
+                    /* Out-of-order but valid */
+                    if (!ooo.count(start))
+                        ooo[start] = std::vector<char>(payload, payload + payload_len);
+                }
+            }
 
             ack_pending = true;
             return true;
@@ -202,9 +225,7 @@ namespace reliable_ordered_channel
 
         uint16_t window() const
         {
-            uint32_t used = rcv_nxt - app_read;
-            uint32_t free = buffer.capacity() - used;
-            return static_cast<uint16_t>(std::min(free, uint32_t(0xFFFF)));
+            return static_cast<uint16_t>(std::min(channel_config::DEFAULT_BUFFER_SIZE - available(), uint32_t(0xFFFF)));
         }
 
         bool need_ack() const { return ack_pending; }
@@ -255,12 +276,11 @@ namespace reliable_ordered_channel
         ssize_t write(const char *src, uint32_t len)
         {
             uint32_t buffered = write_pos - snd_una;
-            uint32_t capacity = buffer.capacity();
+            uint32_t available = channel_config::DEFAULT_BUFFER_SIZE - buffered;
 
-            if (buffered >= capacity)
-                return 0; // buffer full
+            if (available <= 0)
+                return 0;
 
-            uint32_t available = capacity - buffered;
             uint32_t to_write = std::min(len, available);
 
             buffer.write_at(write_pos, src, to_write);
@@ -290,6 +310,9 @@ namespace reliable_ordered_channel
                 if (now - seg.last > channel_config::RTO_MS &&
                     seg.retries < channel_config::MAX_RETRANSMITS)
                 {
+                    if (seg.len > cap)
+                        return 0;
+
                     buffer.read_at(seg.seq, dst, seg.len);
                     seg.last = now;
                     seg.retries++;
@@ -311,10 +334,13 @@ namespace reliable_ordered_channel
 
         void ack(uint32_t ack_no)
         {
-            snd_una = std::max(snd_una, ack_no);
-            while (!inflight_q.empty() &&
-                   inflight_q.front().seq + inflight_q.front().len <= snd_una)
-                inflight_q.pop_front();
+            if (seq_ge(ack_no, snd_una) && seq_lt(ack_no, snd_nxt))
+            {
+                snd_una = std::max(snd_una, ack_no);
+                while (!inflight_q.empty() &&
+                       inflight_q.front().seq + inflight_q.front().len <= snd_una)
+                    inflight_q.pop_front();
+            }
         }
 
         void update_window(uint16_t w) { remote_win = w; }
