@@ -1,176 +1,218 @@
+#include <iostream>
+#include <vector>
+#include <cstring>
+#include <cstdint>
+#include <chrono>
+#include <atomic>
+#include <thread>
+#include <iomanip>
+#include <sstream>
+
 #include "client/client_setup.hpp"
 
-#include <iostream>
-#include <thread>
-#include <chrono>
-#include <vector>
-#include <atomic>
-#include <cstring>
-#include <algorithm>
-#include <iomanip>
-#include <mutex>
+static constexpr size_t TOTAL_BYTES = 200 * 1024; // 10 MB
+static constexpr size_t BUF_SIZE = 1 * 1024;
+static constexpr channel_id CH_ID = 1;
 
-// --- CONFIGURATION ---
-const int TEST_DURATION_SEC = 30;
-const int PACKET_SIZE = 1024; // 1KB Payload
-
-struct Payload
+/* ---------------- TIMESTAMP ---------------- */
+static std::string ts()
 {
-    uint32_t seq;
-    long long timestamp_ns; // Nanoseconds
-    char junk[PACKET_SIZE];
-};
+    using namespace std::chrono;
+    auto now = system_clock::now();
+    auto ms = duration_cast<milliseconds>(now.time_since_epoch()) % 1000;
 
-// --- STATS CONTAINER ---
-struct Stats
+    std::time_t t = system_clock::to_time_t(now);
+    std::tm tm = *std::localtime(&t);
+
+    std::ostringstream oss;
+    oss << std::put_time(&tm, "%H:%M:%S")
+        << "." << std::setw(3) << std::setfill('0') << ms.count();
+    return oss.str();
+}
+
+int main()
 {
-    std::atomic<size_t> sent_packets{0};
-    std::atomic<size_t> recv_packets{0};
-    std::atomic<size_t> bytes_recv{0};
-    std::vector<long long> latencies; // RTT in microseconds
-    std::mutex lat_mtx;
-} stats;
+    auto client = create_client("127.0.0.1", "9000");
+    client->add_channel(CH_ID, channel_type::RELIABLE_ORDERED_CHANNEL);
 
-std::atomic<bool> running{true};
+    std::vector<char> send_buf(TOTAL_BYTES);
+    std::vector<char> recv_buf(TOTAL_BYTES);
 
-void receiver_thread(std::shared_ptr<i_client> client)
-{
-    char buf[65535];
-    channel_id ch;
+    for (size_t i = 0; i < TOTAL_BYTES; ++i)
+        send_buf[i] = static_cast<char>((i * 1315423911ULL) & 0xFF);
 
-    while (running)
+    std::atomic<size_t> received{0};
+    std::atomic<bool> recv_done{false};
+
+    std::cout << ts() << " [Client] START sending + receiving\n";
+
+    /* ---------------- RECEIVER THREAD ---------------- */
+    // std::jthread reader([&]
+    //                     {
+    //     size_t last_bytes = 0;
+    //     auto last_log = std::chrono::steady_clock::now();
+
+    //     while (received.load(std::memory_order_relaxed) < TOTAL_BYTES)
+    //     {
+    //         channel_id ch;
+    //         size_t offset = received.load(std::memory_order_relaxed);
+
+    //         std::cout
+    //             << ts()
+    //             << " [Client][RECV] waiting... offset="
+    //             << offset << "\n";
+
+    //         ssize_t n = client->read_from_channel_blocking(
+    //             ch,
+    //             recv_buf.data() + offset,
+    //             TOTAL_BYTES - offset);
+
+    //         if (n <= 0)
+    //         {
+    //             std::cerr
+    //                 << ts()
+    //                 << " [Client][ERROR][RECV] read failed n="
+    //                 << n << "\n";
+    //             std::terminate();
+    //         }
+
+    //         received.fetch_add(n, std::memory_order_relaxed);
+
+    //         std::cout
+    //             << ts()
+    //             << " [Client][RECV] channel="
+    //             << ch
+    //             << " bytes="
+    //             << n
+    //             << " total_received="
+    //             << received.load()
+    //             << "\n";
+
+    //         auto now = std::chrono::steady_clock::now();
+    //         if (now - last_log >= std::chrono::seconds(1))
+    //         {
+    //             size_t cur = received.load();
+    //             size_t delta = cur - last_bytes;
+
+    //             std::cout
+    //                 << ts()
+    //                 << " [Client][RECV][STATS] "
+    //                 << delta << " bytes/sec ("
+    //                 << std::fixed << std::setprecision(2)
+    //                 << (delta / 1024.0 / 1024.0)
+    //                 << " MB/s)\n";
+
+    //             last_bytes = cur;
+    //             last_log = now;
+    //         }
+    //     }
+
+    //     recv_done.store(true, std::memory_order_release);
+    //     std::cout << ts() << " [Client][RECV] DONE\n"; });
+
+    /* ---------------- SENDER (MAIN THREAD) ---------------- */
+    size_t sent = 0;
+    size_t last_sent = 0;
+    auto last_log = std::chrono::steady_clock::now();
+
+    while (sent < TOTAL_BYTES)
     {
-        ssize_t n = client->read_from_channel_blocking(ch, buf, sizeof(buf));
-        if (n >= static_cast<ssize_t>(sizeof(uint32_t) + sizeof(long long)))
+        size_t chunk = std::min(BUF_SIZE, TOTAL_BYTES - sent);
+
+        std::cout
+            << ts()
+            << " [Client][SEND] attempt chunk="
+            << chunk
+            << " offset="
+            << sent
+            << "\n";
+
+        ssize_t n = client->write_to_channel(
+            CH_ID,
+            send_buf.data() + sent,
+            chunk);
+
+        std::this_thread::sleep_for(duration_ms(100));
+        if (n < 0)
         {
-            auto *p = reinterpret_cast<Payload *>(buf);
+            std::cerr
+                << ts()
+                << " [Client][ERROR][SEND] write failed\n";
+            return 1;
+        }
 
-            auto now = std::chrono::steady_clock::now();
-            long long now_ns =
-                std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    now.time_since_epoch())
-                    .count();
+        sent += n;
 
-            long long rtt_us = (now_ns - p->timestamp_ns) / 1000;
+        std::cout
+            << ts()
+            << " [Client][SEND] wrote="
+            << n
+            << " total_sent="
+            << sent
+            << "\n";
 
-            stats.recv_packets++;
-            stats.bytes_recv += n;
+        auto now = std::chrono::steady_clock::now();
+        if (now - last_log >= std::chrono::seconds(1))
+        {
+            size_t delta = sent - last_sent;
 
-            if (stats.recv_packets % 10 == 0)
-            {
-                std::lock_guard<std::mutex> lock(stats.lat_mtx);
-                stats.latencies.push_back(rtt_us);
-            }
+            std::cout
+                << ts()
+                << " [Client][SEND][STATS] "
+                << delta << " bytes/sec ("
+                << std::fixed << std::setprecision(2)
+                << (delta / 1024.0 / 1024.0)
+                << " MB/s)\n";
+
+            last_sent = sent;
+            last_log = now;
         }
     }
-}
 
-void sender_thread(std::shared_ptr<i_client> client, int wait_time_us)
-{
-    uint32_t seq = 0;
-    std::vector<char> raw_buf(sizeof(Payload));
-    auto *p = reinterpret_cast<Payload *>(raw_buf.data());
+    std::cout
+        << ts()
+        << " [Client][SEND] DONE total="
+        << sent
+        << " bytes\n";
 
-    std::memset(p->junk, 'X', PACKET_SIZE);
-
-    while (running)
+    /* ---------------- WAIT FOR RECEIVER ---------------- */
+    while (!recv_done.load(std::memory_order_acquire))
     {
-        p->seq = ++seq;
-        auto now = std::chrono::steady_clock::now();
-        p->timestamp_ns =
-            std::chrono::duration_cast<std::chrono::nanoseconds>(
-                now.time_since_epoch())
-                .count();
-
-        client->write_to_channel(1, raw_buf.data(), raw_buf.size());
-        stats.sent_packets++;
-
-        if (wait_time_us > 0)
-            std::this_thread::sleep_for(
-                std::chrono::microseconds(wait_time_us));
-    }
-}
-
-int main(int argc, char *argv[])
-{
-    int wait_time_us = 0;
-
-    if (argc >= 2)
-    {
-        wait_time_us = std::stoi(argv[1]);
-        std::cout << "Sender wait time: " << wait_time_us << " us\n";
+        std::cout
+            << ts()
+            << " [Client][WAIT] receiver still running, received="
+            << received.load()
+            << "\n";
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
 
-    std::cout << "=== RUDP ULTIMATE STRESS TEST ===\n";
+    std::cout
+        << ts()
+        << " [Client] FINISHED recv="
+        << received
+        << " bytes\n";
 
-    auto client = create_client("127.0.0.1", "3003");
-    client->add_channel(1, channel_type::RELIABLE_ORDERED_CHANNEL);
-
-    std::thread r_thread(receiver_thread, client);
-    std::thread s_thread(sender_thread, client, wait_time_us);
-
-    std::cout << "Running test for " << TEST_DURATION_SEC << " seconds...\n";
-
-    for (int i = 0; i < TEST_DURATION_SEC; i++)
+    /* ---------------- VERIFY ---------------- */
+    for (size_t i = 0; i < TOTAL_BYTES; ++i)
     {
-        std::this_thread::sleep_for(std::chrono::seconds(1));
-        std::cout << "\r[Running] Sent: " << stats.sent_packets
-                  << " | Recv: " << stats.recv_packets << std::flush;
+        if (send_buf[i] != recv_buf[i])
+        {
+            std::cerr
+                << ts()
+                << " [FATAL] mismatch at byte "
+                << i
+                << " expected="
+                << int((unsigned char)send_buf[i])
+                << " got="
+                << int((unsigned char)recv_buf[i])
+                << "\n";
+            return 1;
+        }
     }
 
-    running = false;
-    client->close_client();
-
-    if (r_thread.joinable())
-        r_thread.join();
-    if (s_thread.joinable())
-        s_thread.join();
-
-    // --- FINAL REPORT ---
-    std::cout << "\n\n=== PERFORMANCE REPORT ===\n";
-    std::cout << "Total Sent:     " << stats.sent_packets << "\n";
-    std::cout << "Total Recv:     " << stats.recv_packets << "\n";
-
-    double loss =
-        100.0 * (1.0 -
-                 (double)stats.recv_packets /
-                     std::max<size_t>(1, stats.sent_packets));
-
-    std::cout << "Packet Loss:    " << std::fixed << std::setprecision(2)
-              << loss << "%\n";
-
-    double total_mb =
-        static_cast<double>(stats.bytes_recv) / (1024.0 * 1024.0);
-    double throughput = total_mb / TEST_DURATION_SEC;
-
-    std::cout << "Avg Throughput: " << throughput << " MiB/s\n";
-
-    std::vector<long long> lats;
-    {
-        std::lock_guard<std::mutex> lock(stats.lat_mtx);
-        lats = stats.latencies;
-    }
-
-    if (!lats.empty())
-    {
-        std::sort(lats.begin(), lats.end());
-
-        long long avg = 0;
-        for (auto v : lats)
-            avg += v;
-        avg /= lats.size();
-
-        std::cout << "Latency (RTT):\n";
-        std::cout << "  Min: " << lats.front() << " us\n";
-        std::cout << "  Avg: " << avg << " us\n";
-        std::cout << "  p95: " << lats[lats.size() * 95 / 100] << " us\n";
-        std::cout << "  p99: " << lats[lats.size() * 99 / 100] << " us\n";
-        std::cout << "  Max: " << lats.back() << " us\n";
-    }
-    else
-    {
-        std::cout << "Latency: No packets received.\n";
-    }
+    std::cout
+        << ts()
+        << " [Client] ✅ DATA VERIFIED SUCCESSFULLY\n";
 
     return 0;
 }

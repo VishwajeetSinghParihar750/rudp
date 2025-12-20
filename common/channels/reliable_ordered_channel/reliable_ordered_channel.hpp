@@ -44,7 +44,7 @@ namespace reliable_ordered_channel
     namespace channel_config
     {
         constexpr uint16_t HEADER_SIZE = 14;
-        constexpr uint32_t DEFAULT_BUFFER_SIZE = 65335;
+        constexpr uint32_t DEFAULT_BUFFER_SIZE = 65535;
         constexpr uint16_t MAX_MSS = 32 * 1024;
         constexpr uint64_t RTO_MS = 200;
         constexpr uint32_t MAX_RETRANSMITS = 5;
@@ -157,7 +157,7 @@ namespace reliable_ordered_channel
         uint32_t app_read = 0;
         bool ack_pending = false;
 
-        uint32_t window_sz = 65535;
+        uint32_t window_sz = channel_config::DEFAULT_BUFFER_SIZE;
 
         std::map<uint32_t, std::vector<char>> ooo;
 
@@ -181,12 +181,9 @@ namespace reliable_ordered_channel
 
             uint32_t start = h.seq_no;
 
-            /* STRICT RULE: no partial overlap allowed */
             if (seq_ge(start, rcv_nxt))
             {
-                // ignore out of order packets if its looping , for simplicity in logic
-
-                uint32_t avail_space = channel_config::DEFAULT_BUFFER_SIZE - available();
+                uint32_t avail_space = window_sz - available();
 
                 if (avail_space >= payload_len)
                 {
@@ -197,7 +194,6 @@ namespace reliable_ordered_channel
                         advance_sack();
                     }
 
-                    /* Out-of-order but valid */
                     if (!ooo.count(start))
                         ooo[start] = std::vector<char>(payload, payload + payload_len);
                 }
@@ -215,9 +211,15 @@ namespace reliable_ordered_channel
             if (!avail)
                 return 0;
 
+            uint32_t advertised_window = window();
+
             uint32_t n = std::min(avail, len);
             buffer.read_at(app_read, dst, n);
             app_read += n;
+
+            if (advertised_window == 0 && window() > 0)
+                ack_pending = true;
+
             return n;
         }
 
@@ -225,7 +227,7 @@ namespace reliable_ordered_channel
 
         uint16_t window() const
         {
-            return static_cast<uint16_t>(std::min(channel_config::DEFAULT_BUFFER_SIZE - available(), uint32_t(0xFFFF)));
+            return static_cast<uint16_t>(std::min(window_sz - available(), uint32_t(0xFFFF)));
         }
 
         bool need_ack() const { return ack_pending; }
@@ -260,7 +262,7 @@ namespace reliable_ordered_channel
     {
         circular_buffer buffer;
         uint32_t snd_una = 0, snd_nxt = 0, write_pos = 0;
-        uint16_t remote_win = 65535;
+        uint16_t remote_win = channel_config::DEFAULT_BUFFER_SIZE;
         std::deque<inflight> inflight_q;
 
         static uint64_t now_ms()
@@ -303,8 +305,13 @@ namespace reliable_ordered_channel
 
         uint32_t get_packet(char *dst, uint32_t cap, uint32_t &seq)
         {
-            uint64_t now = now_ms();
+            if (cap == 0)
+            {
+                seq = snd_nxt;
+                return 0;
+            }
 
+            uint64_t now = now_ms();
             for (auto &seg : inflight_q)
             {
                 if (now - seg.last > channel_config::RTO_MS &&
@@ -343,7 +350,15 @@ namespace reliable_ordered_channel
             }
         }
 
-        void update_window(uint16_t w) { remote_win = w; }
+        void update_window(uint16_t w)
+        {
+            remote_win = w;
+        }
+
+        uint32_t get_window() const
+        {
+            return remote_win;
+        }
     };
 
     /* ================= CHANNEL ================= */
@@ -358,6 +373,39 @@ namespace reliable_ordered_channel
 
         std::function<void()> on_app;
         std::function<void(std::unique_ptr<rudp_protocol_packet>)> on_net;
+
+        std::shared_ptr<i_timer_service> global_timer_manager;
+
+        uint32_t probing_retries = 0;
+
+        void send_probe_segment()
+        {
+            std::weak_ptr this_weak = shared_from_this();
+
+            auto cb = [this_weak]
+            {
+                if (auto sp = this_weak.lock())
+                {
+                    std::unique_lock lock(sp->mtx);
+                    if (sp->snd.get_window() == 0)
+                    {
+                        auto out = sp->send_nolock();
+                        if (out && sp->on_net)
+                        {
+                            sp->on_net(std::move(out));
+                            sp->probing_retries++;
+                            sp->send_probe_segment();
+                        }
+                    }
+                    else
+                        sp->probing_retries = 0;
+                }
+            };
+
+            if (probing_retries < channel_config::MAX_RETRANSMITS)
+                global_timer_manager->add_timer(std::make_shared<timer_info>(
+                    duration_ms(channel_config::RTO_MS * (1 << probing_retries)), cb));
+        }
 
     public:
         explicit reliable_ordered_channel(channel_id cid)
@@ -388,8 +436,15 @@ namespace reliable_ordered_channel
 
                 if (h.flags & uint16_t(channel_flags::ACK))
                     snd.ack(h.ack_no);
+
                 if (h.flags & uint16_t(channel_flags::WIND_SZ))
+                {
+                    uint32_t prev = snd.get_window();
                     snd.update_window(h.win_sz);
+
+                    if (prev > 0 && snd.get_window() == 0)
+                        send_probe_segment();
+                }
 
                 notify = rcv.available() > 0;
 
@@ -409,7 +464,19 @@ namespace reliable_ordered_channel
         ssize_t read_bytes_to_application(char *buf, const uint32_t &len) override
         {
             std::lock_guard lk(mtx);
-            return rcv.read(buf, len);
+            auto toret = rcv.read(buf, len);
+
+            if (rcv.need_ack() && on_net)
+            {
+                auto out = send_nolock();
+                if (out)
+                {
+                    on_net(std::move(out));
+                    rcv.clear_ack();
+                }
+            }
+
+            return toret;
         }
 
         ssize_t write_bytes_from_application(const char *buf, const uint32_t &len) override
@@ -431,13 +498,13 @@ namespace reliable_ordered_channel
 
         void set_on_app_data_ready(std::function<void()> f) override { on_app = f; }
         void set_on_net_data_ready(std::function<void(std::unique_ptr<rudp_protocol_packet>)> f) override { on_net = f; }
-        void set_timer_service(std::shared_ptr<i_timer_service>) override {}
+        void set_timer_service(std::shared_ptr<i_timer_service> timer_service) override { global_timer_manager = timer_service; }
 
     private:
         std::unique_ptr<rudp_protocol_packet> send_nolock()
         {
             uint32_t cap = snd.max_payload();
-            if (!cap && !rcv.need_ack())
+            if (!cap && !rcv.need_ack() && snd.get_window() > 0)
                 return nullptr;
 
             uint32_t size = rudp_protocol_packet::CHANNEL_HEADER_OFFSET +
