@@ -327,7 +327,7 @@ namespace ordered_unreliable_channel
             on_app_data_ready = f;
         }
 
-        void set_on_net_data_ready(std::function<void(std::unique_ptr<rudp_protocol_packet>)> f) override
+        void set_on_net_data_ready(std::function<void(std::shared_ptr<rudp_protocol_packet>)> f) override
         {
             on_net_data_ready = f;
         }

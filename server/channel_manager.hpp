@@ -147,7 +147,7 @@ class channel_manager : public i_server, public i_channel_manager_for_session_co
                 });
 
             ch->set_on_net_data_ready(
-                [this_weak_ptr, cl_id, ch_id](std::unique_ptr<rudp_protocol_packet> pkt)
+                [this_weak_ptr, cl_id, ch_id](std::shared_ptr<rudp_protocol_packet> pkt)
                 {
                     if (auto sp = this_weak_ptr.lock())
                         sp->on_transport_send(cl_id, ch_id, std::move(pkt));
@@ -180,7 +180,7 @@ class channel_manager : public i_server, public i_channel_manager_for_session_co
                 });
 
             ch->set_on_net_data_ready(
-                [this_weak_ptr, cl_id, ch_id](std::unique_ptr<rudp_protocol_packet> pkt)
+                [this_weak_ptr, cl_id, ch_id](std::shared_ptr<rudp_protocol_packet> pkt)
                 {
                     if (auto sp = this_weak_ptr.lock())
                         sp->on_transport_send(cl_id, ch_id, std::move(pkt));
@@ -213,7 +213,7 @@ class channel_manager : public i_server, public i_channel_manager_for_session_co
                 });
 
             ch->set_on_net_data_ready(
-                [this_weak_ptr, cl_id, ch_id](std::unique_ptr<rudp_protocol_packet> pkt)
+                [this_weak_ptr, cl_id, ch_id](std::shared_ptr<rudp_protocol_packet> pkt)
                 {
                     if (auto sp = this_weak_ptr.lock())
                         sp->on_transport_send(cl_id, ch_id, std::move(pkt));
@@ -231,7 +231,7 @@ class channel_manager : public i_server, public i_channel_manager_for_session_co
         }
     }
 
-    void on_transport_send(const client_id &cl_id, const channel_id &ch_id, std::unique_ptr<rudp_protocol_packet> pkt)
+    void on_transport_send(const client_id &cl_id, const channel_id &ch_id, std::shared_ptr<rudp_protocol_packet> pkt)
     {
         LOG_TEST("Transport Send: Client " << cl_id << ", Channel " << ch_id << ", Length " << pkt->get_length());
 
@@ -376,6 +376,7 @@ public:
                             auto cur_channel = ch_opt.value();
                             ssize_t bytes_read = cur_channel->read_bytes_to_application(buf, len);
                             LOG_INFO("Blocking read successful: " << bytes_read << " bytes from ch " << channel_id_);
+
                             return bytes_read;
                         }
                     }

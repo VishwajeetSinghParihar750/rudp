@@ -139,7 +139,7 @@ class channel_manager : public i_client, public i_channel_manager_for_session_co
                 });
 
             ch->set_on_net_data_ready(
-                [this_weak_ptr, ch_id](std::unique_ptr<rudp_protocol_packet> pkt)
+                [this_weak_ptr, ch_id](std::shared_ptr<rudp_protocol_packet> pkt)
                 {
                     if (auto sp = this_weak_ptr.lock())
                         sp->on_transport_send(ch_id, std::move(pkt));
@@ -171,7 +171,7 @@ class channel_manager : public i_client, public i_channel_manager_for_session_co
                 });
 
             ch->set_on_net_data_ready(
-                [this_weak_ptr, ch_id](std::unique_ptr<rudp_protocol_packet> pkt)
+                [this_weak_ptr, ch_id](std::shared_ptr<rudp_protocol_packet> pkt)
                 {
                     if (auto sp = this_weak_ptr.lock())
                         sp->on_transport_send(ch_id, std::move(pkt));
@@ -202,7 +202,7 @@ class channel_manager : public i_client, public i_channel_manager_for_session_co
                 });
 
             ch->set_on_net_data_ready(
-                [this_weak_ptr, ch_id](std::unique_ptr<rudp_protocol_packet> pkt)
+                [this_weak_ptr, ch_id](std::shared_ptr<rudp_protocol_packet> pkt)
                 {
                     if (auto sp = this_weak_ptr.lock())
                         sp->on_transport_send(ch_id, std::move(pkt));
@@ -221,7 +221,7 @@ class channel_manager : public i_client, public i_channel_manager_for_session_co
         }
     }
 
-    void on_transport_send(const channel_id &ch_id, std::unique_ptr<rudp_protocol_packet> pkt)
+    void on_transport_send(const channel_id &ch_id, std::shared_ptr<rudp_protocol_packet> pkt)
     {
 
         serialize_channel_manager_header(*pkt, ch_id);

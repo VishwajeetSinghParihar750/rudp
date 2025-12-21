@@ -27,7 +27,7 @@ public:
     //
     virtual void set_on_app_data_ready(std::function<void()>) = 0;
 
-    virtual void set_on_net_data_ready(std::function<void(std::unique_ptr<rudp_protocol_packet>)>) = 0;
+    virtual void set_on_net_data_ready(std::function<void(std::shared_ptr<rudp_protocol_packet>)>) = 0;
 
     // Timer-related API
     virtual void set_timer_service(std::shared_ptr<i_timer_service>) = 0;

@@ -228,7 +228,7 @@ struct connection_state_machine
         {
             std::weak_ptr<connection_state_machine> self_weak_ptr = shared_from_this();
 
-            global_timer_manager->add_timer(std::make_unique<timer_info>(
+            global_timer_manager->add_timer(std::make_shared<timer_info>(
                 duration_ms(ROUND_TRIP_TIME * 2),
                 [self_weak_ptr, retries_left]()
                 {
@@ -255,7 +255,7 @@ struct connection_state_machine
         {
             std::weak_ptr<connection_state_machine> self_weak_ptr = shared_from_this();
 
-            global_timer_manager->add_timer(std::make_unique<timer_info>(
+            global_timer_manager->add_timer(std::make_shared<timer_info>(
                 duration_ms(ROUND_TRIP_TIME * 2),
                 [self_weak_ptr, retries_left]()
                 {
@@ -542,7 +542,7 @@ public:
                 if (this_shared_ptr->teardown_counter->load() < 2)
                 {
                     LOG_INFO("Teardown polling timer tick. Counter < 2. Rescheduling.");
-                    this_shared_ptr->global_timer_manager->add_timer(std::make_unique<timer_info>(duration_ms(100), cb));
+                    this_shared_ptr->global_timer_manager->add_timer(std::make_shared<timer_info>(duration_ms(100), cb));
                 }
                 else
                 {
@@ -550,7 +550,7 @@ public:
                 }
             };
 
-            global_timer_manager->add_timer(std::make_unique<timer_info>(duration_ms(100), cb));
+            global_timer_manager->add_timer(std::make_shared<timer_info>(duration_ms(100), cb));
         }
     }
 
@@ -593,7 +593,7 @@ public:
         client_fsm->on_server_disconnected();
     }
 
-    void on_transport_send_data(std::unique_ptr<rudp_protocol_packet> pkt) override
+    void on_transport_send_data(std::shared_ptr<rudp_protocol_packet> pkt) override
     {
         if (!client_fsm)
         {

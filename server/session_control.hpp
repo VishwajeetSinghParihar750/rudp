@@ -610,7 +610,7 @@ public:
             {
                 if (this_shared_ptr->clients_fsm.size() > 0)
                 {
-                    this_shared_ptr->global_timer_manager->add_timer(std::make_unique<timer_info>(duration_ms(100), cb));
+                    this_shared_ptr->global_timer_manager->add_timer(std::make_shared<timer_info>(duration_ms(100), cb));
                 }
                 else
                 {
@@ -618,7 +618,7 @@ public:
                 }
             };
 
-            global_timer_manager->add_timer(std::make_unique<timer_info>(duration_ms(100), cb));
+            global_timer_manager->add_timer(std::make_shared<timer_info>(duration_ms(100), cb));
         }
     }
     void notify_removal_of_client(const client_id &cl_id) override
@@ -662,7 +662,7 @@ public:
         }
     }
 
-    void on_transport_send_data(const client_id &cl_id, std::unique_ptr<rudp_protocol_packet> pkt) override
+    void on_transport_send_data(const client_id &cl_id, std::shared_ptr<rudp_protocol_packet> pkt) override
     {
         if (verify_can_exchange_data(cl_id))
         {
