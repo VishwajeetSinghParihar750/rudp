@@ -4,160 +4,79 @@
 #include <atomic>
 #include <thread>
 #include <iomanip>
-#include <sstream>
-#include <cstdint>
 #include <algorithm>
-
 #include "client/client_setup.hpp"
 
-static constexpr size_t TOTAL_BYTES = 1ull * 1024 * 1024 * 1024; // 1 GB
-static constexpr size_t BUF_SIZE = 32 * 1024;
-static constexpr channel_id CH_ID = 1;
+static constexpr size_t GB = 1024ull * 1024 * 1024;
+static constexpr size_t PER_CHANNEL_GOAL = 1ull * GB; 
+static constexpr size_t TOTAL_EXPECTED = 3ull * GB; 
 
-/* ---------------- TIMESTAMP ---------------- */
-// static std::string ts()
-// {
-//     using namespace std::chrono;
-//     auto now = system_clock::now();
-//     auto ms = duration_cast<milliseconds>(now.time_since_epoch()) % 1000;
-
-//     std::time_t t = system_clock::to_time_t(now);
-//     std::tm tm = *std::localtime(&t);
-
-//     std::ostringstream oss;
-//     oss << std::put_time(&tm, "%H:%M:%S")
-//         << "." << std::setw(3) << std::setfill('0') << ms.count();
-//     return oss.str();
-// }
-
-/* ---------------- FAST STREAMING HASH (FNV-1a) ---------------- */
-static inline uint64_t hash_byte(uint64_t h, char b)
+// Worker now takes 'buf_size' as a parameter
+void send_worker(std::shared_ptr<i_client> client, channel_id ch, size_t bytes_to_send, size_t buf_size, std::atomic<size_t> &global_sent)
 {
-    h ^= static_cast<unsigned char>(b);
-    h *= 1099511628211ull;
-    return h;
+    // Create a buffer specific to this thread's requirements
+    std::vector<char> buf(buf_size, 'A'); 
+    size_t sent_by_thread = 0;
+
+    while (sent_by_thread < bytes_to_send)
+    {
+        size_t chunk = std::min(buf_size, bytes_to_send - sent_by_thread);
+        ssize_t n = client->write_to_channel(ch, buf.data(), chunk);
+
+        if (n > 0)
+        {
+            sent_by_thread += n;
+            global_sent.fetch_add(n, std::memory_order_relaxed);
+        }
+        else
+        {
+            // Prevent 100% CPU spin if the OS/Internal buffer is full
+            std::this_thread::yield(); 
+        }
+    }
+    std::cout << "[Client] Channel " << (int)ch << " (Buf: " << buf_size << " bytes) finished sending 1GB.\n";
 }
 
 int main()
 {
     auto client = create_client("127.0.0.1", "9000");
-    client->add_channel(CH_ID, channel_type::RELIABLE_ORDERED_CHANNEL);
 
-    std::vector<char> buf(BUF_SIZE);
+    // 1. Setup Channels
+    client->add_channel(1, channel_type::RELIABLE_ORDERED_CHANNEL);
+    client->add_channel(2, channel_type::ORDERED_UNRELIABLE_CHANNEL);
+    client->add_channel(3, channel_type::UNORDERED_UNRELIABLE_CHANNEL);
 
-    std::atomic<size_t> sent{0};
-    std::atomic<size_t> received{0};
+    std::atomic<size_t> total_sent{0};
+    auto start_time = std::chrono::steady_clock::now();
 
-    uint64_t send_hash = 1469598103934665603ull;
-    uint64_t recv_hash = 1469598103934665603ull;
+    // 2. Start 3 Sender Threads with varying buffer sizes
+    // Channel 1: 16KB (16384 bytes)
+    std::thread t1(send_worker, client, 1, PER_CHANNEL_GOAL, 1 * 1024, std::ref(total_sent));
+    
+    // Channel 2 & 3: 512 Bytes
+    std::thread t2(send_worker, client, 2, PER_CHANNEL_GOAL, 1024, std::ref(total_sent));
+    std::thread t3(send_worker, client, 3, PER_CHANNEL_GOAL, 1024, std::ref(total_sent));
 
-    // std::cout << ts() << " [Client] START 1GB send + echo\n";
-
-    /* ---------------- RECEIVER THREAD ---------------- */
-    // std::jthread receiver([&]
-    //                       {
-    //     auto last_log = std::chrono::steady_clock::now();
-    //     size_t last   = 0;
-
-    //     while (received.load(std::memory_order_relaxed) < TOTAL_BYTES)
-    //     {
-    //         channel_id ch;
-    //         ssize_t n = client->read_from_channel_blocking(
-    //             ch,
-    //             buf.data(),
-    //             buf.size());
-
-    //        if (n > 0    ) {
-
-    //         for (ssize_t i = 0; i < n; ++i)
-    //             recv_hash = hash_byte(recv_hash, buf[i]);
-
-    //         received.fetch_add(n, std::memory_order_relaxed);
-
-    //        }
-    //         auto now = std::chrono::steady_clock::now();
-    //         if (now - last_log >= std::chrono::seconds(1))
-    //         {
-    //             size_t cur   = received.load();
-    //             size_t delta = cur - last;
-
-    //             std::cout
-    //                 // << ts()
-    //                 << " [Client][RECV][STATS] "
-    //                 << (delta / (1024.0 * 1024.0))
-    //                 << " MB/s" << std::endl;
-
-    //             last     = cur;
-    //             last_log = now;
-    //         }
-    //     }
-
-    //     std::cout  << " [Client][RECV] DONE" << std::endl; });
-
-    /* ---------------- SENDER (MAIN THREAD) ---------------- */
-    auto last_log = std::chrono::steady_clock::now();
-    size_t last = 0;
-
-    while (sent.load(std::memory_order_relaxed) < TOTAL_BYTES)
+    // 3. Monitor Progress
+    while (total_sent < TOTAL_EXPECTED)
     {
-        size_t offset = sent.load();
-        size_t chunk = std::min(BUF_SIZE, TOTAL_BYTES - offset);
-
-        // generate deterministic data on the fly
-        // for (size_t i = 0; i < chunk; ++i)
-        // {
-        //     char v = static_cast<char>((offset + i) * 1315423911ull);
-        //     buf[i] = v;
-        //     // send_hash = hash_byte(send_hash, v);
-        // }
-
-        ssize_t n = client->write_to_channel(
-            CH_ID,
-            buf.data(),
-            chunk);
-        // std::this_thread::sleep_for(duration_ms(1));
-        if (n > 0)
-        {
-            sent.fetch_add(n, std::memory_order_relaxed);
-        }
-        auto now = std::chrono::steady_clock::now();
-        if (now - last_log >= std::chrono::seconds(1))
-        {
-            size_t cur = sent.load();
-            size_t delta = cur - last;
-
-            std::cout
-                << "total : " << cur
-                << ", [Client][SEND][STATS] "
-                << (delta / (1024.0 * 1024.0))
-                << " MB/s" << std::endl;
-
-            last = cur;
-            last_log = now;
-        }
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+        double progress = (total_sent.load() / (double)TOTAL_EXPECTED) * 100.0;
+        double sent_mb = total_sent.load() / (1024.0 * 1024.0);
+        
+        std::cout << "[Client] Total Progress: " << std::fixed << std::setprecision(2)
+                  << progress << "% (" << (int)sent_mb << " MB / 3072 MB)\r" << std::flush;
     }
 
-    std::cout
-        // << ts()
-        << " [Client][SEND] DONE total="
-        << (sent.load() / (1024.0 * 1024.0))
-        << " MB" << std::endl;
+    t1.join();
+    t2.join();
+    t3.join();
 
-    // receiver.join();
+    auto end_time = std::chrono::steady_clock::now();
+    std::chrono::duration<double> diff = end_time - start_time;
 
-    /* ---------------- VERIFY ---------------- */
-    // std::cout << ts() << " [Client] verifying...\n";
+    std::cout << "\n\n[Client] ALL CHANNELS FINISHED (3GB Total) in " << diff.count() << "s\n";
+    std::cout << "Aggregate Throughput: " << (TOTAL_EXPECTED / (1024.0 * 1024.0)) / diff.count() << " MB/s\n";
 
-    if (send_hash != recv_hash)
-    {
-        std::cerr
-            // << ts()
-            << " [FATAL] HASH MISMATCH\n"
-            << "send_hash=0x" << std::hex << send_hash << "\n"
-            << "recv_hash=0x" << std::hex << recv_hash << "\n";
-        return 1;
-    }
-
-    std::cout << " [Client] ✅ DATA VERIFIED (1GB OK)\n";
     return 0;
 }

@@ -28,7 +28,7 @@ namespace ordered_unreliable_channel
     namespace channel_config
     {
         constexpr uint16_t HEADER_SIZE = 5;
-        constexpr uint32_t DEFAULT_BUFFER_SIZE = 32 * 1024 * 1024;
+        constexpr uint32_t DEFAULT_BUFFER_SIZE = 1024* 1024;
         constexpr uint16_t MAX_MSS = 65000;
     }
 

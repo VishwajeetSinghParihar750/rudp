@@ -22,7 +22,7 @@ namespace unordered_unreliable_channel
     namespace channel_config
     {
         constexpr uint16_t HEADER_SIZE = 0;
-        constexpr uint32_t DEFAULT_BUFFER_SIZE = 64 * 1024;
+        constexpr uint32_t DEFAULT_BUFFER_SIZE = 1024 * 1024;
         constexpr uint16_t MAX_MSS = 65000;
     }
 
@@ -69,7 +69,7 @@ namespace unordered_unreliable_channel
 
             auto &pkt = data.front();
             uint32_t off = rudp_protocol_packet::CHANNEL_HEADER_OFFSET;
-            uint32_t packet_size = pkt->get_length() - off;
+            uint32_t packet_size = pkt->get_length() - off - channel_config::HEADER_SIZE;
 
             uint32_t toread = std::min(packet_size, sz);
             std::memcpy(obuf, pkt->get_buffer() + off, toread);
@@ -86,7 +86,7 @@ namespace unordered_unreliable_channel
 
             uint32_t payload =
                 pkt->get_length() -
-                rudp_protocol_packet::CHANNEL_HEADER_OFFSET;
+                rudp_protocol_packet::CHANNEL_HEADER_OFFSET - channel_config::HEADER_SIZE;
 
             if (payload == 0 || bytes_avail + payload > size)
                 return false;
@@ -106,7 +106,7 @@ namespace unordered_unreliable_channel
 
             uint32_t payload =
                 ret->get_length() -
-                rudp_protocol_packet::CHANNEL_HEADER_OFFSET;
+                rudp_protocol_packet::CHANNEL_HEADER_OFFSET - channel_config::HEADER_SIZE;
 
             bytes_avail -= payload;
             return ret;
@@ -164,8 +164,8 @@ namespace unordered_unreliable_channel
             if (!pkt)
                 return false;
 
-            char *packet = pkt->get_buffer() + rudp_protocol_packet::CHANNEL_HEADER_OFFSET;
-            uint32_t packet_size = pkt->get_length() - rudp_protocol_packet::CHANNEL_HEADER_OFFSET;
+            char *packet = pkt->get_buffer() + rudp_protocol_packet::CHANNEL_HEADER_OFFSET + channel_config::HEADER_SIZE;
+            uint32_t packet_size = pkt->get_length() - rudp_protocol_packet::CHANNEL_HEADER_OFFSET - channel_config::HEADER_SIZE;
 
             if (!packet_codec::deserialize_header(packet, packet_size, out_header))
                 return false;
@@ -195,7 +195,7 @@ namespace unordered_unreliable_channel
         receive_window rcv_window;
 
         std::function<void()> on_app_data_ready;
-        std::function<void(std::unique_ptr<rudp_protocol_packet>)> on_net_data_ready;
+        std::function<void(std::shared_ptr<rudp_protocol_packet>)> on_net_data_ready;
 
         mutable std::mutex mutex_; // SINGLE MUTEX
 
@@ -205,7 +205,7 @@ namespace unordered_unreliable_channel
             if (!pkt)
                 return nullptr;
 
-            char *pkt_buf = pkt->get_buffer() + rudp_protocol_packet::CHANNEL_HEADER_OFFSET;
+            char *pkt_buf = pkt->get_buffer() + rudp_protocol_packet::CHANNEL_HEADER_OFFSET + channel_config::HEADER_SIZE;
             channel_header h{};
             packet_codec::serialize_header(pkt_buf, h);
             return pkt;

@@ -45,7 +45,7 @@ namespace reliable_ordered_channel
     namespace channel_config
     {
         constexpr uint16_t HEADER_SIZE = 16;
-        constexpr uint32_t DEFAULT_BUFFER_SIZE = 128 * 1024;
+        constexpr uint32_t DEFAULT_BUFFER_SIZE = 1024 * 1024;
         constexpr uint16_t MAX_MSS = 32 * 1024;
         constexpr uint64_t RTO_MS = 400;
         constexpr uint32_t MAX_RETRANSMITS = 15;
@@ -222,7 +222,6 @@ namespace reliable_ordered_channel
                 return 0;
             buffer.read_at(app_read, dst, n);
             app_read += n;
-            // std::cout << "app read index : " << app_read << std::endl;
             return n;
         }
 
@@ -230,7 +229,7 @@ namespace reliable_ordered_channel
 
         uint32_t window() const
         {
-            return window_sz - available();
+            return window_sz;
         }
 
         bool need_ack() const { return ack_pending; }
@@ -305,12 +304,8 @@ namespace reliable_ordered_channel
 
         void ack(uint32_t ack_no)
         {
-
-            // std::cout << "rcvd acknowledgment number : " << ack_no << std::endl;
-
             if (seq_ge(ack_no, snd_una) && seq_le(ack_no, snd_nxt))
             {
-                // std::cout << "acknowledged till : " << ack_no << std::endl;
                 snd_una = ack_no;
             }
         }
@@ -364,35 +359,27 @@ namespace reliable_ordered_channel
 
         void add_probing_timer_helper(std::weak_ptr<prober> cur_prober_weak)
         {
-            // std::cout << "came to set prober " << std::endl;
             std::weak_ptr this_weak = shared_from_this();
 
             auto cb = [this_weak, cur_prober_weak]
             {
-                // std::cout << "prober call back 1  " << std::endl;
                 if (auto prober_sp = cur_prober_weak.lock())
                 {
-                    // std::cout << "prober call back 2  " << std::endl;
                     if (auto sp = this_weak.lock())
                     {
-                        // std::cout << "prober call back 3  " << std::endl;
                         std::unique_lock lock(sp->mtx);
 
                         if (sp->snd.get_window() == 0)
                         {
-                            // std::cout << "prober call back 4  " << std::endl;
                             std::vector<std::pair<uint32_t, std::shared_ptr<rudp_protocol_packet>>> out;
 
                             sp->to_probe = true; // set to probe
 
-                            static int called = 0;
-                            // std::cout << "prober timer called " << (called++) << std::endl;
-
                             sp->send_nolock(out);
                             for (auto &i : out)
                             {
-                                sp->add_rto_timer(i.first, i.second);
                                 sp->on_net(i.second);
+                                sp->add_rto_timer(i.first, i.second);
                             }
                             sp->add_probing_timer_helper(cur_prober_weak);
                         }
@@ -414,7 +401,6 @@ namespace reliable_ordered_channel
 
         void add_probing_timer()
         {
-            // std::cout << "came to direct prober setter " << std::endl;
             my_prober = std::make_shared<prober>(0); // new prober,old gone
             add_probing_timer_helper(my_prober);
         }
@@ -429,9 +415,6 @@ namespace reliable_ordered_channel
                 {
                     if (auto inflight_sp = nxt_weak.lock())
                     {
-
-                        static int called = 0;
-                        std::cout << "rto timer called " << (called++) << std::endl;
 
                         inflight_sp->retries++;
                         sp->on_net(inflight_sp->pkt);
@@ -457,44 +440,38 @@ namespace reliable_ordered_channel
             add_rto_timer_helper(nxt);
         }
 
-        std::jthread debug_thread;
+        // std::jthread debug_thread;
 
     public:
-        ~reliable_ordered_channel()
-        {
-            if (debug_thread.joinable())
-                debug_thread.join();
-        }
-
         explicit reliable_ordered_channel(channel_id cid)
             : id(cid),
               snd(channel_config::DEFAULT_BUFFER_SIZE),
               rcv(channel_config::DEFAULT_BUFFER_SIZE)
         {
-            debug_thread = std::jthread([this](std::stop_token stoken)
-                                        {
+            // debug_thread = std::jthread([this](std::stop_token stoken)
+            //                             {
 
-            while (!stoken.stop_requested()) {
-                {
-                    std::cout << "waiting lock debug thread " << std::endl;
-                    std::unique_lock lk(mtx);
-                    std::cout << "came debug thread " << std::endl;
-                        std::cout
-                            << "[DBG][CH " << id << "] "
-                            << "snd_una=" << snd.snd_una
-                            << " snd_nxt=" << snd.snd_nxt
-                            << " snd_wnd=" << snd.get_window()
-                            << " rcv_avail=" << rcv.available()
-                            << " rcv_wnd=" << rcv.window()
-                            << " inflight=" << inflight_q.size()
-                            << " to_probe=" << to_probe
-                            << " probe_active=" << (my_prober != nullptr)
-                            << std::endl;
+            // while (!stoken.stop_requested()) {
+            //     {
+            //         std::cout << "waiting lock debug thread " << std::endl;
+            //         std::unique_lock lk(mtx);
+            //         std::cout << "came debug thread " << std::endl;
+            //             std::cout
+            //                 << "[DBG][CH " << id << "] "
+            //                 << "snd_una=" << snd.snd_una
+            //                 << " snd_nxt=" << snd.snd_nxt
+            //                 << " snd_wnd=" << snd.get_window()
+            //                 << " rcv_avail=" << rcv.available()
+            //                 << " rcv_wnd=" << rcv.window()
+            //                 << " inflight=" << inflight_q.size()
+            //                 << " to_probe=" << to_probe
+            //                 << " probe_active=" << (my_prober != nullptr)
+            //                 << std::endl;
 
-                }
+            //     }
 
-                std::this_thread::sleep_for(duration_ms(1000));
-            } });
+            //     std::this_thread::sleep_for(duration_ms(1000));
+            // } });
         }
 
         std::unique_ptr<i_channel> clone() const override { return nullptr; }
@@ -529,24 +506,15 @@ namespace reliable_ordered_channel
                             break;
 
                     snd.ack(h.ack_no);
-                    // std::cout << "ack no : " << h.ack_no << std::endl;
-
-                    // std::cout << "ack no " << h.ack_no << std::endl;
-
                     uint32_t prev_win = snd.get_window();
-                    // std::cout << "prev window : " << prev_win << std::endl;
-
-                    // snd.update_window(h.win_sz); ⚠️⚠️
+                    snd.update_window(h.win_sz);
 
                     uint32_t new_window = snd.get_window();
 
                     if (prev_win > 0 && new_window == 0)
                     {
-                        // std::cout << "going to set prober " << std::endl;
-
                         add_probing_timer();
                     }
-                    // std::cout << "new window : " << snd.get_window() << std::endl;
                 }
 
                 notify = rcv.available() > 0;
@@ -627,8 +595,6 @@ namespace reliable_ordered_channel
             pkt->set_length(rudp_protocol_packet::CHANNEL_HEADER_OFFSET +
                             channel_config::HEADER_SIZE + len);
 
-            // std::cout << "sending seq no " << seq << std::endl;
-
             channel_header h{};
             h.seq_no = seq;
 
@@ -641,7 +607,6 @@ namespace reliable_ordered_channel
             }
             else if (to_probe) // coz ack and probe cant go together
             {
-                // std::cout << "sending probe mesage " << std::endl;
                 to_probe = false;
             }
 
