@@ -47,7 +47,7 @@ namespace reliable_ordered_channel
         constexpr uint16_t HEADER_SIZE = 16;
         constexpr uint32_t DEFAULT_BUFFER_SIZE = 128 * 1024;
         constexpr uint16_t MAX_MSS = 32 * 1024;
-        constexpr uint64_t RTO_MS = 200;
+        constexpr uint64_t RTO_MS = 400;
         constexpr uint32_t MAX_RETRANSMITS = 15;
     }
 
@@ -154,19 +154,19 @@ namespace reliable_ordered_channel
 
     /* ================= RECEIVE WINDOW ================= */
 
-    class receive_window
+    struct receive_window
     {
         circular_buffer buffer;
         uint32_t rcv_nxt = 0;
         uint32_t app_read = 0;
         bool ack_pending = false;
 
-        uint32_t window_sz = channel_config::DEFAULT_BUFFER_SIZE;
+        uint32_t window_sz = 0;
 
         std::map<uint32_t, uint32_t> ooo; // keeps start and len
 
     public:
-        explicit receive_window(uint32_t cap)
+        explicit receive_window(uint32_t cap = channel_config::DEFAULT_BUFFER_SIZE)
             : buffer(cap), window_sz(cap) {}
 
         bool receive_packet(const char *pkt, uint32_t sz, channel_header &h) // returns if it kept any bytes
@@ -205,10 +205,9 @@ namespace reliable_ordered_channel
                     else if (!ooo.count(start))
                         ooo[start] = payload_len;
                 }
-
-                ack_pending = true;
             }
 
+            ack_pending = true;
             return true;
         }
 
@@ -253,7 +252,7 @@ namespace reliable_ordered_channel
 
     /* ================= SEND WINDOW ================= */
 
-    class send_window
+    struct send_window
     {
         circular_buffer buffer;
         uint32_t snd_una = 0, snd_nxt = 0, write_pos = 0;
@@ -378,18 +377,23 @@ namespace reliable_ordered_channel
                     {
                         // std::cout << "prober call back 3  " << std::endl;
                         std::unique_lock lock(sp->mtx);
+
                         if (sp->snd.get_window() == 0)
                         {
-                            //
                             // std::cout << "prober call back 4  " << std::endl;
-                            std::vector<std::shared_ptr<rudp_protocol_packet>> out;
+                            std::vector<std::pair<uint32_t, std::shared_ptr<rudp_protocol_packet>>> out;
 
                             sp->to_probe = true; // set to probe
 
+                            static int called = 0;
+                            // std::cout << "prober timer called " << (called++) << std::endl;
+
                             sp->send_nolock(out);
                             for (auto &i : out)
-                                sp->on_net(std::move(i));
-
+                            {
+                                sp->add_rto_timer(i.first, i.second);
+                                sp->on_net(i.second);
+                            }
                             sp->add_probing_timer_helper(cur_prober_weak);
                         }
                         else
@@ -426,7 +430,8 @@ namespace reliable_ordered_channel
                     if (auto inflight_sp = nxt_weak.lock())
                     {
 
-                        std::unique_lock lock(sp->mtx);
+                        static int called = 0;
+                        std::cout << "rto timer called " << (called++) << std::endl;
 
                         inflight_sp->retries++;
                         sp->on_net(inflight_sp->pkt);
@@ -440,22 +445,56 @@ namespace reliable_ordered_channel
                     global_timer_manager->add_timer(std::make_shared<timer_info>(duration_ms(channel_config::RTO_MS * (1ll << sp->retries)), cb));
         }
 
-        void
-        add_rto_timer(uint32_t seq_no, std::shared_ptr<rudp_protocol_packet> pkt)
+        void add_rto_timer(uint32_t seq_no, std::shared_ptr<rudp_protocol_packet> pkt)
         {
 
-            uint32_t len = pkt->get_length() - channel_config::HEADER_SIZE;
+            long long len = pkt->get_length() - channel_config::HEADER_SIZE - rudp_protocol_packet::CHANNEL_HEADER_OFFSET;
+            if (len <= 0)
+                return;
+
             auto nxt = std::make_shared<inflight>(seq_no, len, 0, pkt);
-            inflight_q.push_back(std::move(nxt));
+            inflight_q.push_back(nxt);
             add_rto_timer_helper(nxt);
         }
 
+        std::jthread debug_thread;
+
     public:
+        ~reliable_ordered_channel()
+        {
+            if (debug_thread.joinable())
+                debug_thread.join();
+        }
+
         explicit reliable_ordered_channel(channel_id cid)
             : id(cid),
               snd(channel_config::DEFAULT_BUFFER_SIZE),
               rcv(channel_config::DEFAULT_BUFFER_SIZE)
         {
+            debug_thread = std::jthread([this](std::stop_token stoken)
+                                        {
+
+            while (!stoken.stop_requested()) {
+                {
+                    std::cout << "waiting lock debug thread " << std::endl;
+                    std::unique_lock lk(mtx);
+                    std::cout << "came debug thread " << std::endl;
+                        std::cout
+                            << "[DBG][CH " << id << "] "
+                            << "snd_una=" << snd.snd_una
+                            << " snd_nxt=" << snd.snd_nxt
+                            << " snd_wnd=" << snd.get_window()
+                            << " rcv_avail=" << rcv.available()
+                            << " rcv_wnd=" << rcv.window()
+                            << " inflight=" << inflight_q.size()
+                            << " to_probe=" << to_probe
+                            << " probe_active=" << (my_prober != nullptr)
+                            << std::endl;
+
+                }
+
+                std::this_thread::sleep_for(duration_ms(1000));
+            } });
         }
 
         std::unique_ptr<i_channel> clone() const override { return nullptr; }
@@ -465,7 +504,7 @@ namespace reliable_ordered_channel
             if (!pkt)
                 return;
 
-            std::vector<std::shared_ptr<rudp_protocol_packet>> out;
+            std::vector<std::pair<uint32_t, std::shared_ptr<rudp_protocol_packet>>> out;
             bool notify = false;
 
             {
@@ -490,19 +529,21 @@ namespace reliable_ordered_channel
                             break;
 
                     snd.ack(h.ack_no);
+                    // std::cout << "ack no : " << h.ack_no << std::endl;
 
                     // std::cout << "ack no " << h.ack_no << std::endl;
 
                     uint32_t prev_win = snd.get_window();
                     // std::cout << "prev window : " << prev_win << std::endl;
 
-                    snd.update_window(h.win_sz);
+                    // snd.update_window(h.win_sz); ⚠️⚠️
 
                     uint32_t new_window = snd.get_window();
 
                     if (prev_win > 0 && new_window == 0)
                     {
                         // std::cout << "going to set prober " << std::endl;
+
                         add_probing_timer();
                     }
                     // std::cout << "new window : " << snd.get_window() << std::endl;
@@ -511,13 +552,17 @@ namespace reliable_ordered_channel
                 notify = rcv.available() > 0;
 
                 send_nolock(out);
+
+                if (!out.empty() && on_net)
+                    for (auto &i : out)
+                    {
+                        on_net(i.second);
+                        add_rto_timer(i.first, i.second);
+                    }
             }
 
             if (notify && on_app)
                 on_app();
-            if (!out.empty() && on_net)
-                for (auto &i : out)
-                    on_net(std::move(i));
         }
 
         ssize_t read_bytes_to_application(char *buf, const uint32_t &len) override
@@ -533,8 +578,8 @@ namespace reliable_ordered_channel
 
         ssize_t write_bytes_from_application(const char *buf, const uint32_t &len) override
         {
-            std::vector<std::shared_ptr<rudp_protocol_packet>> out;
-            ssize_t ret;
+            std::vector<std::pair<uint32_t, std::shared_ptr<rudp_protocol_packet>>> out;
+            ssize_t ret = 0;
 
             {
                 std::lock_guard lk(mtx);
@@ -542,11 +587,14 @@ namespace reliable_ordered_channel
 
                 if (ret > 0)
                     send_nolock(out);
-            }
 
-            if (!out.empty() && on_net)
-                for (auto &i : out)
-                    on_net(std::move(i));
+                if (!out.empty() && on_net)
+                    for (auto &i : out)
+                    {
+                        on_net(i.second);
+                        add_rto_timer(i.first, i.second);
+                    }
+            }
 
             return ret;
         }
@@ -560,7 +608,7 @@ namespace reliable_ordered_channel
         void set_timer_service(std::shared_ptr<i_timer_service> timer_service) override { global_timer_manager = timer_service; }
 
     private:
-        void send_nolock(std::vector<std::shared_ptr<rudp_protocol_packet>> &out)
+        void send_nolock(std::vector<std::pair<uint32_t, std::shared_ptr<rudp_protocol_packet>>> &out)
         {
             uint32_t cap = snd.max_payload();
             if (!cap && !rcv.need_ack() && !to_probe)
@@ -599,12 +647,7 @@ namespace reliable_ordered_channel
 
             packet_codec::serialize_header(buf, h);
 
-            out.push_back(pkt);
-
-            if (len > 0)
-            {
-                add_rto_timer(seq, pkt);
-            }
+            out.push_back({seq, pkt});
 
             send_nolock(out);
         }

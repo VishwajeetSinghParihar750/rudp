@@ -104,12 +104,12 @@ int main()
         size_t chunk = std::min(BUF_SIZE, TOTAL_BYTES - offset);
 
         // generate deterministic data on the fly
-        for (size_t i = 0; i < chunk; ++i)
-        {
-            char v = static_cast<char>((offset + i) * 1315423911ull);
-            buf[i] = v;
-            send_hash = hash_byte(send_hash, v);
-        }
+        // for (size_t i = 0; i < chunk; ++i)
+        // {
+        //     char v = static_cast<char>((offset + i) * 1315423911ull);
+        //     buf[i] = v;
+        //     // send_hash = hash_byte(send_hash, v);
+        // }
 
         ssize_t n = client->write_to_channel(
             CH_ID,

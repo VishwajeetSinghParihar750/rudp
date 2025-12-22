@@ -5,7 +5,7 @@
 
 #include "server/server_setup.hpp"
 
-static constexpr size_t BUF_SIZE = 32 * 1024; // larger buffer = fewer syscalls
+static constexpr size_t BUF_SIZE = 128 * 1024; // larger buffer = fewer syscalls
 
 static std::string ts()
 {
@@ -41,7 +41,7 @@ int main()
         channel_id ch;
         client_id cl;
 
-        ssize_t n = server->read_from_channel_blocking(
+        ssize_t n = server->read_from_channel_nonblocking(
             ch,
             cl,
             buf.data(),
