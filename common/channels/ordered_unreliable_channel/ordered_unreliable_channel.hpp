@@ -28,7 +28,7 @@ namespace ordered_unreliable_channel
     namespace channel_config
     {
         constexpr uint16_t HEADER_SIZE = 5;
-        constexpr uint32_t DEFAULT_BUFFER_SIZE = 1024* 1024;
+        constexpr uint32_t DEFAULT_BUFFER_SIZE = 1024 * 1024;
         constexpr uint16_t MAX_MSS = 65000;
     }
 
@@ -95,6 +95,7 @@ namespace ordered_unreliable_channel
             uint32_t packet_size = pkt->get_length() - off;
 
             uint32_t toread = std::min(packet_size, sz);
+            
             memcpy(obuf, pkt->get_buffer() + off, toread);
 
             data.pop();
@@ -287,10 +288,7 @@ namespace ordered_unreliable_channel
             std::lock_guard<std::mutex> lock(mutex_);
 
             channel_header header{};
-            if (!rcv_window.receive_packet(std::move(pkt), header))
-                return;
-
-            if (rcv_window.get_available_bytes_cnt() > 0 && on_app_data_ready)
+            if (rcv_window.receive_packet(std::move(pkt), header))
                 on_app_data_ready();
         }
 
@@ -299,8 +297,6 @@ namespace ordered_unreliable_channel
             std::lock_guard<std::mutex> lock(mutex_);
 
             ssize_t ret = rcv_window.read_data(buf, len);
-            if (rcv_window.get_available_bytes_cnt() > 0 && on_app_data_ready)
-                on_app_data_ready();
             return ret;
         }
 

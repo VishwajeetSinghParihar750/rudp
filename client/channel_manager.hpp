@@ -388,7 +388,7 @@ public:
     {
         if (pkt->get_length() < rudp_protocol_packet::CHANNEL_MANAGER_HEADER_OFFSET + rudp_protocol_packet::CHANNEL_MANAGER_HEADER_SIZE)
         {
-            LOG_ERROR(" packet too small for channel manager " << pkt->get_length());
+            LOG_ERROR(" packet too small for channel manager means most likely control packet " << pkt->get_length());
             return;
         }
 

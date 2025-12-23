@@ -218,10 +218,19 @@ namespace reliable_ordered_channel
             uint32_t avail = available();
             uint32_t n = std::min(avail, len);
 
+            auto prev_win = window();
+
             if (n == 0)
                 return 0;
             buffer.read_at(app_read, dst, n);
             app_read += n;
+
+            auto new_win = window();
+
+            // for NAGLE'S ALGORITHM
+            if (prev_win < channel_config::MAX_MSS && new_win >= channel_config::MAX_MSS)
+                ack_pending = true;
+
             return n;
         }
 
@@ -229,7 +238,7 @@ namespace reliable_ordered_channel
 
         uint32_t window() const
         {
-            return window_sz;
+            return window_sz - available();
         }
 
         bool need_ack() const { return ack_pending; }
@@ -274,6 +283,10 @@ namespace reliable_ordered_channel
             write_pos += to_write;
 
             return to_write;
+        }
+        uint32_t get_in_flight() const
+        {
+            return snd_nxt - snd_una;
         }
         //
         uint32_t max_payload() const
@@ -371,16 +384,8 @@ namespace reliable_ordered_channel
 
                         if (sp->snd.get_window() == 0)
                         {
-                            std::vector<std::pair<uint32_t, std::shared_ptr<rudp_protocol_packet>>> out;
-
                             sp->to_probe = true; // set to probe
-
-                            sp->send_nolock(out);
-                            for (auto &i : out)
-                            {
-                                sp->on_net(i.second);
-                                sp->add_rto_timer(i.first, i.second);
-                            }
+                            sp->send_nolock();
                             sp->add_probing_timer_helper(cur_prober_weak);
                         }
                         else
@@ -415,7 +420,6 @@ namespace reliable_ordered_channel
                 {
                     if (auto inflight_sp = nxt_weak.lock())
                     {
-
                         inflight_sp->retries++;
                         sp->on_net(inflight_sp->pkt);
                         sp->add_rto_timer_helper(nxt_weak);
@@ -441,6 +445,8 @@ namespace reliable_ordered_channel
         }
 
         // std::jthread debug_thread;
+
+        uint32_t prev_advertised_window = 0;
 
     public:
         explicit reliable_ordered_channel(channel_id cid)
@@ -499,6 +505,7 @@ namespace reliable_ordered_channel
 
                 if (h.flags & uint16_t(channel_flags::ACK))
                 {
+
                     for (auto it = inflight_q.begin(); it != inflight_q.end();)
                         if (seq_le((*it)->seq + (*it)->len, h.ack_no))
                             it = inflight_q.erase(it);
@@ -512,21 +519,12 @@ namespace reliable_ordered_channel
                     uint32_t new_window = snd.get_window();
 
                     if (prev_win > 0 && new_window == 0)
-                    {
                         add_probing_timer();
-                    }
                 }
 
+                send_nolock();
+
                 notify = rcv.available() > 0;
-
-                send_nolock(out);
-
-                if (!out.empty() && on_net)
-                    for (auto &i : out)
-                    {
-                        on_net(i.second);
-                        add_rto_timer(i.first, i.second);
-                    }
             }
 
             if (notify && on_app)
@@ -535,40 +533,33 @@ namespace reliable_ordered_channel
 
         ssize_t read_bytes_to_application(char *buf, const uint32_t &len) override
         {
+            std::vector<std::pair<uint32_t, std::shared_ptr<rudp_protocol_packet>>> out;
             std::lock_guard lk(mtx);
+
             ssize_t ret = rcv.read(buf, len);
 
             if (rcv.available() > 0)
                 on_app();
+
+            send_nolock();
 
             return ret;
         }
 
         ssize_t write_bytes_from_application(const char *buf, const uint32_t &len) override
         {
-            std::vector<std::pair<uint32_t, std::shared_ptr<rudp_protocol_packet>>> out;
             ssize_t ret = 0;
 
-            {
-                std::lock_guard lk(mtx);
-                ret = snd.write(buf, len);
+            std::lock_guard lk(mtx);
 
-                if (ret > 0)
-                    send_nolock(out);
+            ret = snd.write(buf, len);
 
-                if (!out.empty() && on_net)
-                    for (auto &i : out)
-                    {
-                        on_net(i.second);
-                        add_rto_timer(i.first, i.second);
-                    }
-            }
+            send_nolock();
 
             return ret;
         }
 
-        void
-        set_on_app_data_ready(std::function<void()> f) override
+        void set_on_app_data_ready(std::function<void()> f) override
         {
             on_app = f;
         }
@@ -576,16 +567,24 @@ namespace reliable_ordered_channel
         void set_timer_service(std::shared_ptr<i_timer_service> timer_service) override { global_timer_manager = timer_service; }
 
     private:
-        void send_nolock(std::vector<std::pair<uint32_t, std::shared_ptr<rudp_protocol_packet>>> &out)
+        void send_nolock()
         {
+
             uint32_t cap = snd.max_payload();
-            if (!cap && !rcv.need_ack() && !to_probe)
+
+            // _______________________________ NAGLE'S ALGORITHM based if statement
+
+            if (uint32_t in_flight_cnt = snd.get_in_flight();
+                !(rcv.need_ack() || to_probe ||
+                  (cap > 0 && (in_flight_cnt == 0 || cap == channel_config::MAX_MSS))))
                 return;
+
+            std::shared_ptr<rudp_protocol_packet> pkt;
 
             uint32_t size = rudp_protocol_packet::CHANNEL_HEADER_OFFSET +
                             channel_config::HEADER_SIZE + cap;
 
-            auto pkt = std::make_shared<rudp_protocol_packet>(size);
+            pkt = std::make_shared<rudp_protocol_packet>(size);
             char *buf = pkt->get_buffer() + rudp_protocol_packet::CHANNEL_HEADER_OFFSET;
             char *payload = buf + channel_config::HEADER_SIZE;
 
@@ -600,21 +599,28 @@ namespace reliable_ordered_channel
 
             if (rcv.need_ack())
             {
+                // _______________________________ CLARK'S ALGORITHM
                 h.flags = uint16_t(channel_flags::ACK);
                 h.ack_no = rcv.ack_no();
-                h.win_sz = rcv.window();
+
+                uint32_t win_to_send = rcv.window();
+                if (win_to_send < channel_config::MAX_MSS)
+                    win_to_send = 0;
+                h.win_sz = win_to_send;
+
+                prev_advertised_window = win_to_send;
+
                 rcv.clear_ack();
             }
-            else if (to_probe) // coz ack and probe cant go together
-            {
+            else if (to_probe) // coz cant probe with ack based on logic
                 to_probe = false;
-            }
 
             packet_codec::serialize_header(buf, h);
 
-            out.push_back({seq, pkt});
+            on_net(pkt);
+            add_rto_timer(seq, pkt);
 
-            send_nolock(out);
+            send_nolock();
         }
     };
 }

@@ -178,7 +178,7 @@ struct connection_state_machine
         send_response_to_network_without_piggybacking_nolock();
     }
 
-    void last_ack_cb_with_retry(int retries_left = 5)
+    void last_ack_cb_with_retry(int retries_left = 10)
     {
         std::lock_guard<std::mutex> lg(g_connection_state_machine_mutex);
 
@@ -191,11 +191,11 @@ struct connection_state_machine
         last_response = {get_fin_flag(), true};
         send_response_to_network_without_piggybacking_nolock();
 
-        if (retries_left > 1)
+        if (retries_left > 0)
         {
             std::weak_ptr<connection_state_machine> self = shared_from_this();
 
-            global_timer_manager->add_timer(std::make_unique<timer_info>(
+            global_timer_manager->add_timer(std::make_shared<timer_info>(
                 duration_ms(ROUND_TRIP_TIME * 2),
                 [self, retries_left]()
                 {
@@ -541,7 +541,8 @@ class session_control : public i_session_control_for_udp, public i_session_contr
                                                                              {
                                                                                 char buf[rudp_protocol_packet::SESSION_CONTROL_HEADER_SIZE] = {0};
 
-                                                                                uint32_t net_reserved = 0;
+                                                                                uint32_t net_reserved = htonl(0);
+                                                                                
                                                                                 
                                                                                 memcpy(buf, &fsm_flags, sizeof(fsm_flags));
                                                                                 
