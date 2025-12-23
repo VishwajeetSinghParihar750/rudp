@@ -8,8 +8,8 @@
 #include "client/client_setup.hpp"
 
 static constexpr size_t GB = 1024ull * 1024 * 1024;
-static constexpr size_t PER_CHANNEL_GOAL = 1ull * GB;
-static constexpr size_t TOTAL_EXPECTED = PER_CHANNEL_GOAL * 3;
+static constexpr size_t PER_CHANNEL_GOAL = 1ull * 10 * GB;
+static constexpr size_t TOTAL_EXPECTED = PER_CHANNEL_GOAL * 1;
 
 // Worker now takes 'buf_size' as a parameter
 void send_worker(std::shared_ptr<i_client> client, channel_id ch, size_t bytes_to_send, size_t buf_size, std::atomic<size_t> &global_sent)
@@ -31,7 +31,9 @@ void send_worker(std::shared_ptr<i_client> client, channel_id ch, size_t bytes_t
         else
         {
             // Prevent 100% CPU spin if the OS/Internal buffer is full
-            std::this_thread::yield();
+            // std::this_thread::yield();
+
+            std::this_thread::sleep_for(duration_ms(1));
         }
     }
     std::cout << "[Client] Channel " << (int)ch << " (Buf: " << buf_size << " bytes) finished sending 1GB.\n";
@@ -51,7 +53,7 @@ int main()
 
     // 2. Start 3 Sender Threads with varying buffer sizes
     // Channel 1: 16KB (16384 bytes)
-    std::thread t1(send_worker, client, 1, PER_CHANNEL_GOAL, 32 * 1024, std::ref(total_sent));
+    std::thread t1(send_worker, client, 1, PER_CHANNEL_GOAL, 8 * 1024, std::ref(total_sent));
 
     // // Channel 2 & 3: 512 Bytes
     // std::thread t2(send_worker, client, 2, PER_CHANNEL_GOAL, 1024, std::ref(total_sent));

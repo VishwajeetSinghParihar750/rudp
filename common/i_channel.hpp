@@ -3,9 +3,9 @@
 #include <memory>
 #include <functional>
 
-class rudp_protocol_packet;
+#include "rudp_protocol_packet.hpp"
+
 class i_timer_service;
-class rudp_protocol_packet;
 
 class i_channel
 {
