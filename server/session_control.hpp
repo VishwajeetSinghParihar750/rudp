@@ -2,22 +2,27 @@
 
 #include <unordered_map>
 #include <memory>
+#include <assert.h>
 #include <mutex>
 #include <atomic>
 #include <vector>
-
-#include "../common/transport_addr.hpp"
-#include "../common/i_timer_service.hpp"
-#include "../common/timer_info.hpp"
-#include "../common/thread_safe_unordered_map.hpp"
-#include "../common/rudp_protocol_packet.hpp"
-#include "../common/logger.hpp"
-#include "../common/types.hpp"
+#include <sstream>
+#include <iostream>
 
 #include "i_udp_for_session_control.hpp"
-#include "i_session_control_for_channel_manager.hpp"
-#include "i_session_control_for_udp.hpp"
 #include "i_channel_manager_for_session_control.hpp"
+#include "i_session_control_for_udp.hpp"
+#include "i_session_control_for_channel_manager.hpp"
+
+#include "../common/transport_addr.hpp"
+#include "../common/rudp_protocol_packet.hpp"
+#include "../common/timer_info.hpp"
+#include "../common/i_timer_service.hpp"
+#include "../common/thread_safe_unordered_map.hpp"
+#include "../common/types.hpp"
+#include "../common/logger.hpp"
+
+class i_client;
 
 struct session_control_header
 {
@@ -36,6 +41,7 @@ enum class CONNECTION_STATE
     LAST_ACK,
     TIME_WAIT
 };
+
 inline std::string state_to_string(CONNECTION_STATE s)
 {
     switch (s)
@@ -64,6 +70,7 @@ enum class CONTROL_PACKET_HEADER_FLAGS : uint8_t
     RST = (1 << 2),
     FIN = (1 << 3),
 };
+
 inline std::string flags_to_string(uint8_t flags)
 {
     std::string s;
@@ -79,32 +86,10 @@ inline std::string flags_to_string(uint8_t flags)
         s.pop_back();
     return s.empty() ? "None" : s;
 }
-struct connection_state_machine
-    : public std::enable_shared_from_this<connection_state_machine>
+
+class connection_state_machine : public std::enable_shared_from_this<connection_state_machine>
 {
-    std::mutex g_connection_state_machine_mutex;
-
-    static constexpr uint32_t ROUND_TRIP_TIME = 2000;
-
-    std::atomic<CONNECTION_STATE> current_state = CONNECTION_STATE::LISTEN;
-
-    std::function<void(uint8_t)> on_send_control_packet_to_transport;
-    std::shared_ptr<i_timer_service> global_timer_manager;
-
-    connection_state_machine(std::function<void(uint8_t)> f,
-                             std::shared_ptr<i_timer_service> timer_man)
-        : current_state(CONNECTION_STATE::LISTEN),
-          on_send_control_packet_to_transport(f),
-          global_timer_manager(timer_man)
-    {
-        LOG_INFO("[connection_state_machine] FSM created, state: LISTEN");
-    }
-
-    ~connection_state_machine()
-    {
-        LOG_INFO("[connection_state_machine] FSM destroyed.");
-    }
-
+public:
     struct fsm_result
     {
         bool close_connection = false;
@@ -117,33 +102,24 @@ struct connection_state_machine
         bool to_send = false;
     };
 
-    to_send_response last_response;
-    TimerInfoTimePoint last_ack_send_time;
-
-    // ------------------------------------------------
-    // NOLOCK HELPERS
-    // ------------------------------------------------
-
-    void set_last_ack_sent_time_nolock()
+    connection_state_machine(std::function<void(uint8_t)> f, std::shared_ptr<i_timer_service> timer_man)
+        : current_state(CONNECTION_STATE::LISTEN),
+          on_send_control_packet_to_transport(f),
+          global_timer_manager(timer_man)
     {
-        last_ack_send_time = std::chrono::steady_clock::now();
+        LOG_INFO("[connection_state_machine] FSM created, state: LISTEN");
     }
 
-    void send_response_to_network_without_piggybacking_nolock()
+    ~connection_state_machine()
     {
-        if (!last_response.to_send)
-            return;
-
-        LOG_TEST("[FSM] Sending control packet: "
-                 << flags_to_string(last_response.response_flags)
-                 << " (Standalone)");
-
-        if (last_response.response_flags & get_ack_flag())
-            set_last_ack_sent_time_nolock();
-
-        on_send_control_packet_to_transport(last_response.response_flags);
-        last_response.to_send = false;
+        LOG_INFO("[connection_state_machine] FSM destroyed.");
     }
+
+    // Delete copy and move
+    connection_state_machine(const connection_state_machine &) = delete;
+    connection_state_machine &operator=(const connection_state_machine &) = delete;
+    connection_state_machine(connection_state_machine &&) = delete;
+    connection_state_machine &operator=(connection_state_machine &&) = delete;
 
     // ------------------------------------------------
     // PUBLIC API
@@ -155,6 +131,11 @@ struct connection_state_machine
         return current_state.load() == CONNECTION_STATE::ESTABLISHED;
     }
 
+    CONNECTION_STATE get_current_state() const
+    {
+        return current_state.load();
+    }
+
     to_send_response get_to_send_response()
     {
         std::lock_guard<std::mutex> lg(g_connection_state_machine_mutex);
@@ -164,8 +145,7 @@ struct connection_state_machine
         if ((toret.response_flags & get_ack_flag()) && toret.to_send)
         {
             set_last_ack_sent_time_nolock();
-            LOG_TEST("[FSM] Piggybacking "
-                     << flags_to_string(toret.response_flags));
+            LOG_TEST("[FSM] Piggybacking " << flags_to_string(toret.response_flags));
         }
 
         last_response.to_send = false;
@@ -178,75 +158,11 @@ struct connection_state_machine
         send_response_to_network_without_piggybacking_nolock();
     }
 
-    void last_ack_cb_with_retry(int retries_left = 10)
-    {
-        std::lock_guard<std::mutex> lg(g_connection_state_machine_mutex);
-
-        if (current_state.load() != CONNECTION_STATE::LAST_ACK || retries_left <= 0)
-            return;
-
-        LOG_INFO("[FSM] LAST_ACK retry "
-                 << std::to_string(6 - retries_left) << "/5");
-
-        last_response = {get_fin_flag(), true};
-        send_response_to_network_without_piggybacking_nolock();
-
-        if (retries_left > 0)
-        {
-            std::weak_ptr<connection_state_machine> self = shared_from_this();
-
-            global_timer_manager->add_timer(std::make_shared<timer_info>(
-                duration_ms(ROUND_TRIP_TIME * 2),
-                [self, retries_left]()
-                {
-                    if (auto sp = self.lock())
-                        sp->last_ack_cb_with_retry(retries_left - 1);
-                }));
-        }
-        else
-        {
-            LOG_WARN("[FSM] LAST_ACK retries exhausted");
-        }
-    }
-
-    void time_wait_cb_with_retry(int retries_left = 5)
-    {
-        std::lock_guard<std::mutex> lg(g_connection_state_machine_mutex);
-
-        auto time_spent = std::chrono::duration_cast<duration_ms>(
-            std::chrono::steady_clock::now() - last_ack_send_time);
-
-        if (retries_left > 0 &&
-            time_spent < duration_ms(ROUND_TRIP_TIME * 2))
-        {
-            std::weak_ptr<connection_state_machine> self = shared_from_this();
-
-            global_timer_manager->add_timer(std::make_unique<timer_info>(
-                duration_ms(ROUND_TRIP_TIME * 2),
-                [self, retries_left]()
-                {
-                    if (auto sp = self.lock())
-                        sp->time_wait_cb_with_retry(retries_left - 1);
-                }));
-        }
-        else
-        {
-            current_state.store(CONNECTION_STATE::CLOSED);
-            LOG_INFO("[FSM] TIME_WAIT -> CLOSED (2*RTT elapsed)");
-        }
-    }
-
-    uint8_t get_ack_flag() const { return uint8_t(CONTROL_PACKET_HEADER_FLAGS::ACK); }
-    uint8_t get_rst_flag() const { return uint8_t(CONTROL_PACKET_HEADER_FLAGS::RST); }
-    uint8_t get_fin_flag() const { return uint8_t(CONTROL_PACKET_HEADER_FLAGS::FIN); }
-    uint8_t get_syn_flag() const { return uint8_t(CONTROL_PACKET_HEADER_FLAGS::SYN); }
-
     fsm_result close()
     {
         std::lock_guard<std::mutex> lg(g_connection_state_machine_mutex);
 
-        LOG_INFO("[FSM::close] State: "
-                 << state_to_string(current_state.load()));
+        LOG_INFO("[FSM::close] State: " << state_to_string(current_state.load()));
 
         if (current_state.load() == CONNECTION_STATE::ESTABLISHED)
         {
@@ -339,10 +255,111 @@ struct connection_state_machine
 
         return {false, false};
     }
+
+private:
+    std::mutex g_connection_state_machine_mutex;
+    static constexpr uint32_t ROUND_TRIP_TIME = 2000;
+
+    std::atomic<CONNECTION_STATE> current_state;
+    std::function<void(uint8_t)> on_send_control_packet_to_transport;
+    std::shared_ptr<i_timer_service> global_timer_manager;
+
+    to_send_response last_response;
+    TimerInfoTimePoint last_ack_send_time;
+
+    // ------------------------------------------------
+    // INTERNAL HELPERS
+    // ------------------------------------------------
+
+    uint8_t get_ack_flag() const { return uint8_t(CONTROL_PACKET_HEADER_FLAGS::ACK); }
+    uint8_t get_rst_flag() const { return uint8_t(CONTROL_PACKET_HEADER_FLAGS::RST); }
+    uint8_t get_fin_flag() const { return uint8_t(CONTROL_PACKET_HEADER_FLAGS::FIN); }
+    uint8_t get_syn_flag() const { return uint8_t(CONTROL_PACKET_HEADER_FLAGS::SYN); }
+
+    void set_last_ack_sent_time_nolock()
+    {
+        last_ack_send_time = std::chrono::steady_clock::now();
+    }
+
+    void send_response_to_network_without_piggybacking_nolock()
+    {
+        if (!last_response.to_send)
+            return;
+
+        LOG_TEST("[FSM] Sending control packet: "
+                 << flags_to_string(last_response.response_flags)
+                 << " (Standalone)");
+
+        if (last_response.response_flags & get_ack_flag())
+            set_last_ack_sent_time_nolock();
+
+        on_send_control_packet_to_transport(last_response.response_flags);
+        last_response.to_send = false;
+    }
+
+    void last_ack_cb_with_retry(int retries_left = 10)
+    {
+        if (current_state.load() != CONNECTION_STATE::LAST_ACK || retries_left <= 0)
+            return;
+
+        LOG_INFO("[FSM] LAST_ACK retry "
+                 << std::to_string(11 - retries_left) << "/10");
+
+        last_response = {get_fin_flag(), true};
+        send_response_to_network_without_piggybacking_nolock();
+
+        if (retries_left > 0)
+        {
+            std::weak_ptr<connection_state_machine> self = shared_from_this();
+            global_timer_manager->add_timer(std::make_shared<timer_info>(
+                duration_ms(ROUND_TRIP_TIME * 2),
+                [self, retries_left]()
+                {
+                    if (auto sp = self.lock())
+                    {
+                        std::lock_guard<std::mutex> lg(sp->g_connection_state_machine_mutex);
+                        sp->last_ack_cb_with_retry(retries_left - 1);
+                    }
+                }));
+        }
+        else
+        {
+            LOG_WARN("[FSM] LAST_ACK retries exhausted");
+        }
+    }
+
+    void time_wait_cb_with_retry(int retries_left = 5)
+    {
+        // Mutex is already locked by caller (handle_change) or timer callback
+        auto time_spent = std::chrono::duration_cast<duration_ms>(
+            std::chrono::steady_clock::now() - last_ack_send_time);
+
+        if (retries_left > 0 &&
+            time_spent < duration_ms(ROUND_TRIP_TIME * 2))
+        {
+            std::weak_ptr<connection_state_machine> self = shared_from_this();
+            global_timer_manager->add_timer(std::make_unique<timer_info>(
+                duration_ms(ROUND_TRIP_TIME * 2),
+                [self, retries_left]()
+                {
+                    if (auto sp = self.lock())
+                    {
+                        std::lock_guard<std::mutex> lg(sp->g_connection_state_machine_mutex);
+                        sp->time_wait_cb_with_retry(retries_left - 1);
+                    }
+                }));
+        }
+        else
+        {
+            current_state.store(CONNECTION_STATE::CLOSED);
+            LOG_INFO("[FSM] TIME_WAIT -> CLOSED (2*RTT elapsed)");
+        }
+    }
 };
 
 class session_control : public i_session_control_for_udp, public i_session_control_for_channel_manager, public std::enable_shared_from_this<session_control>
 {
+    // ... (Keep existing member variables) ...
     std::atomic<bool> server_closed = false;
 
     std::shared_ptr<i_timer_service> global_timer_manager;
@@ -354,6 +371,7 @@ class session_control : public i_session_control_for_udp, public i_session_contr
 
     thread_safe_unordered_map<client_id, std::shared_ptr<std::atomic<int>>> teardown_counter;
 
+    // ... (Keep existing private helpers: perform_final_cleanup, trigger_teardown_step) ...
     void perform_final_cleanup(client_id cl_id)
     {
         LOG_INFO("Session Control: Performing final cleanup for client " << cl_id);
@@ -366,6 +384,7 @@ class session_control : public i_session_control_for_udp, public i_session_contr
         teardown_counter.erase(cl_id);
         clients_fsm.erase(cl_id);
     }
+
     void trigger_teardown_step(client_id cl_id)
     {
         auto counter = teardown_counter.get(cl_id);
@@ -428,14 +447,14 @@ class session_control : public i_session_control_for_udp, public i_session_contr
 
     void parse_session_control_packet_header(const rudp_protocol_packet &incoming_pkt, const transport_addr &source_addr)
     {
+        // ... (Logic kept exactly identical, just inside class methods) ...
         uint8_t flags = *reinterpret_cast<const uint8_t *>(incoming_pkt.get_const_buffer() + rudp_protocol_packet::SESSION_CONTROL_HEADER_OFFSET);
 
-        const char *buf =
-            incoming_pkt.get_const_buffer() + rudp_protocol_packet::SESSION_CONTROL_HEADER_OFFSET;
+        const char *buf = incoming_pkt.get_const_buffer() + rudp_protocol_packet::SESSION_CONTROL_HEADER_OFFSET;
 
         uint32_t reserved_net;
         std::memcpy(&reserved_net, buf + sizeof(flags), sizeof(reserved_net));
-        uint32_t reserved = ntohl(reserved_net);
+        // uint32_t reserved = ntohl(reserved_net); // Unused currently
 
         uint8_t control_flags = flags & ((uint8_t(1) << 4) - 1);
         LOG_TEST("Session Control: Received packet from " << source_addr.to_string() << ". Flags: " << flags_to_string(control_flags));
@@ -449,7 +468,6 @@ class session_control : public i_session_control_for_udp, public i_session_contr
             }
 
             client_id cl_id = INVALID_CLIENT_ID;
-
             do
             {
                 cl_id = get_random_client_id();
@@ -462,16 +480,13 @@ class session_control : public i_session_control_for_udp, public i_session_contr
 
             auto fsm_opt = clients_fsm.get(cl_id);
             if (!fsm_opt)
-            {
-                LOG_ERROR("Session Control: FSM creation failed for new client " << cl_id);
                 return;
-            }
 
             connection_state_machine::fsm_result res = fsm_opt.value()->handle_change(control_flags);
 
             if (res.close_connection)
             {
-                LOG_WARN("Session Control: FSM immediately closed connection for new client. Erasing FSM/ID.");
+                LOG_WARN("Session Control: FSM immediately closed connection for new client.");
                 teardown_counter.erase(cl_id);
                 clients_fsm.erase(cl_id);
             }
@@ -494,40 +509,22 @@ class session_control : public i_session_control_for_udp, public i_session_contr
         {
             auto cid_opt = clients_addr_to_id.get(source_addr);
             if (!cid_opt)
-            {
-                LOG_ERROR("Session Control: Lookup failed for existing address " << source_addr.to_string());
                 return;
-            }
             client_id cl_id = cid_opt.value();
 
             auto fsm_opt = clients_fsm.get(cl_id);
             if (!fsm_opt)
-            {
-                LOG_WARN("Session Control: Received packet from known address, but FSM missing for client " << cl_id << ". Ignoring.");
                 return;
-            }
 
             connection_state_machine::fsm_result res = fsm_opt.value()->handle_change(control_flags);
 
             if (res.close_connection)
-            {
-                if (!teardown_counter.contains(cl_id))
-                {
-                    LOG_ERROR("Session Control: Missing counter during close_connection for client " << cl_id << ". Created new counter.");
-                }
-
                 trigger_teardown_step(cl_id);
-            }
 
             if (res.stop_data_exchange)
             {
                 if (auto sp = channel_manager_ptr.lock())
                 {
-                    if (!teardown_counter.contains(cl_id))
-                    {
-                        LOG_ERROR("Session Control: Missing counter during stop_data_exchange for client " << cl_id << ". Created new counter.");
-                    }
-
                     sp->remove_client(cl_id);
                     LOG_INFO("Session Control: Notifying Channel Manager of client removal for " << cl_id);
                 }
@@ -539,17 +536,14 @@ class session_control : public i_session_control_for_udp, public i_session_contr
     {
         clients_fsm.insert(cl_id, std::make_shared<connection_state_machine>([source_addr, cl_id, this](uint8_t fsm_flags)
                                                                              {
-                                                                                char buf[rudp_protocol_packet::SESSION_CONTROL_HEADER_SIZE] = {0};
-
-                                                                                uint32_t net_reserved = htonl(0);
-                                                                                
-                                                                                
-                                                                                memcpy(buf, &fsm_flags, sizeof(fsm_flags));
-                                                                                
-                                                                                memcpy(buf + sizeof(fsm_flags), &net_reserved, sizeof(net_reserved)); 
-                                                                                
-                                                                                LOG_INFO("Control Packet Send: Client " << cl_id << ", Flags: " << flags_to_string(fsm_flags));
-                                                                                this->udp_ptr->send_packet_to_network(source_addr, buf, sizeof(buf)); }, global_timer_manager));
+            char buf[rudp_protocol_packet::SESSION_CONTROL_HEADER_SIZE] = {0};
+            uint32_t net_reserved = htonl(0);
+            
+            memcpy(buf, &fsm_flags, sizeof(fsm_flags));
+            memcpy(buf + sizeof(fsm_flags), &net_reserved, sizeof(net_reserved)); 
+            
+            LOG_INFO("Control Packet Send: Client " << cl_id << ", Flags: " << flags_to_string(fsm_flags));
+            this->udp_ptr->send_packet_to_network(source_addr, buf, sizeof(buf)); }, global_timer_manager));
     }
 
 public:
@@ -560,6 +554,15 @@ public:
     private:
         server_setup_access_key() {}
     };
+
+    session_control() { LOG_INFO("session_control object created."); }
+    ~session_control() = default;
+
+    // Explicitly delete copy/move
+    session_control(const session_control &) = delete;
+    session_control &operator=(const session_control &) = delete;
+    session_control(session_control &&) = delete;
+    session_control &operator=(session_control &&) = delete;
 
     void set_i_timer_service(std::shared_ptr<i_timer_service> timer_man, server_setup_access_key)
     {
@@ -592,12 +595,12 @@ public:
             if (res.close_connection)
             {
                 to_clean_up.push_back(cl_id);
-                LOG_INFO("Session Control: Client " << cl_id << " FSM closed immediately. Preparing for cleanup.");
+                LOG_INFO("Session Control: Client " << cl_id << " FSM closed immediately.");
             }
             else
             {
                 trigger_teardown_step(cl_id);
-                LOG_INFO("Session Control: Client " << cl_id << " starting graceful teardown (Counter=1).");
+                LOG_INFO("Session Control: Client " << cl_id << " starting graceful teardown.");
             }
         }
         for (auto i : to_clean_up)
@@ -618,10 +621,10 @@ public:
                     LOG_CRITICAL("Session Control: All client FSMs gracefully closed.");
                 }
             };
-
             global_timer_manager->add_timer(std::make_shared<timer_info>(duration_ms(100), cb));
         }
     }
+
     void notify_removal_of_client(const client_id &cl_id) override
     {
         LOG_INFO("Session Control: Channel Manager notified client removal for " << cl_id << " (App side teardown).");
@@ -630,10 +633,9 @@ public:
 
     void on_transport_receive(std::unique_ptr<rudp_protocol_packet> pkt, std::unique_ptr<transport_addr> source_addr) override
     {
-
         if (pkt->get_length() < rudp_protocol_packet::SESSION_CONTROL_HEADER_OFFSET + rudp_protocol_packet::SESSION_CONTROL_HEADER_SIZE)
         {
-            LOG_CRITICAL("Received packet but too small for session control. Dropping.");
+            LOG_CRITICAL("Received packet too small. Dropping.");
             return;
         }
         parse_session_control_packet_header(*pkt, *source_addr);
@@ -646,7 +648,6 @@ public:
             {
                 if (auto cm_sp = channel_manager_ptr.lock())
                 {
-
                     LOG_TEST("Session Control: Forwarding data packet to Channel Manager for client " << cl_id);
                     cm_sp->on_transport_receive(cl_id, std::move(pkt));
                 }
@@ -658,7 +659,6 @@ public:
         }
         else
         {
-
             LOG_WARN("Session Control: Dropping data packet from unknown address " << source_addr->to_string());
         }
     }

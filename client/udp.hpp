@@ -251,6 +251,11 @@ public:
             { event_loop(token); });
     }
 
+    udp(const udp &) = delete;
+    udp &operator=(const udp &) = delete;
+    udp(udp &&) = delete;
+    udp &operator=(udp &&) = delete;
+
     ~udp()
     {
         io_thread.request_stop();

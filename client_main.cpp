@@ -56,8 +56,8 @@ int main()
     std::thread t1(send_worker, client, 1, PER_CHANNEL_GOAL, 16 * 1024, std::ref(total_sent));
 
     // // Channel 2 & 3: 512 Bytes
-    // std::thread t2(send_worker, client, 2, PER_CHANNEL_GOAL, 32 * 1024, std::ref(total_sent));
-    // std::thread t3(send_worker, client, 3, PER_CHANNEL_GOAL, 32 * 1024, std::ref(total_sent));
+    std::thread t2(send_worker, client, 2, PER_CHANNEL_GOAL, 32 * 1024, std::ref(total_sent));
+    std::thread t3(send_worker, client, 3, PER_CHANNEL_GOAL, 32 * 1024, std::ref(total_sent));
 
     // 3. Monitor Progress
     while (total_sent < TOTAL_EXPECTED)

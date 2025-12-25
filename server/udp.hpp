@@ -281,6 +281,11 @@ public:
             { event_loop(st); });
     }
 
+    udp(const udp &) = delete;
+    udp &operator=(const udp &) = delete;
+    udp(udp &&) = delete;
+    udp &operator=(udp &&) = delete;
+
     ~udp()
     {
         LOG_INFO("UDP server destructor: closing resources.");

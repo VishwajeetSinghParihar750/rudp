@@ -30,11 +30,6 @@
 #include "i_session_control_for_channel_manager.hpp"
 #include "udp.hpp"
 
-struct channel_manager_header
-{
-    channel_id ch_id;
-    channel_manager_header(const channel_id &id) : ch_id(id) {}
-};
 enum class READ_FROM_CHANNEL_ERROR : ssize_t
 {
     SERVER_DISCONNECTED = -1,
@@ -60,7 +55,11 @@ struct rcv_ready_queue_info
 class channel_manager : public i_client, public i_channel_manager_for_session_control, public std::enable_shared_from_this<channel_manager>
 {
 
-    static constexpr uint32_t MAX_CHANNELS = 2048;
+    struct channel_manager_header
+    {
+        channel_id ch_id;
+        channel_manager_header(const channel_id &id) : ch_id(id) {}
+    };
 
     thread_safe_priority_queue<rcv_ready_queue_info, std::vector<rcv_ready_queue_info>, std::greater<rcv_ready_queue_info>> ready_to_rcv_queue;
 
@@ -236,6 +235,14 @@ class channel_manager : public i_client, public i_channel_manager_for_session_co
     }
 
 public:
+    channel_manager() = default;
+    ~channel_manager() = default;
+    // explictly deleting copy/move
+    channel_manager(const channel_manager &) = delete;
+    channel_manager &operator=(const channel_manager &) = delete;
+    channel_manager(channel_manager &&) = delete;
+    channel_manager &operator=(channel_manager &&) = delete;
+
     class client_setup_access_key
     {
         friend std::shared_ptr<i_client> create_client(const char *, const char *);
@@ -243,14 +250,9 @@ public:
     private:
         client_setup_access_key() {}
     };
+
     void add_channel(channel_id ch_id, channel_type type) override
     {
-        if (channels.size() >= MAX_CHANNELS)
-        {
-            LOG_WARN("Cannot add channel " << ch_id << ". Maximum channel limit (" << MAX_CHANNELS << ") reached.");
-            return;
-        }
-
         if (ch_id != INVALID_CHANNEL_ID && !channels.contains(ch_id))
         {
             channels.emplace(ch_id, type);
@@ -388,7 +390,7 @@ public:
     {
         if (pkt->get_length() < rudp_protocol_packet::CHANNEL_MANAGER_HEADER_OFFSET + rudp_protocol_packet::CHANNEL_MANAGER_HEADER_SIZE)
         {
-            LOG_ERROR(" packet too small for channel manager means most likely control packet " << pkt->get_length());
+            LOG_INFO(" packet too small for channel manager means most likely control packet " << pkt->get_length());
             return;
         }
 

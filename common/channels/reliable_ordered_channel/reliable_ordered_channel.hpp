@@ -483,6 +483,12 @@ namespace reliable_ordered_channel
         explicit reliable_ordered_channel(channel_id cid)
             : id(cid), snd(channel_config::DEFAULT_BUFFER_SIZE), rcv(channel_config::DEFAULT_BUFFER_SIZE) {}
 
+        ~reliable_ordered_channel() = default;
+        reliable_ordered_channel(const reliable_ordered_channel &) = delete;
+        reliable_ordered_channel(reliable_ordered_channel &&) = delete;
+        void operator=(const reliable_ordered_channel &) = delete;
+        void operator=(reliable_ordered_channel &&) = delete;
+        //
         std::unique_ptr<i_channel> clone() const override { return nullptr; }
 
         void on_transport_receive(std::unique_ptr<rudp_protocol_packet> pkt_unique) override

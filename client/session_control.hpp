@@ -38,7 +38,7 @@ enum class CONNECTION_STATE
     TIME_WAIT
 };
 
-const char *connection_state_to_string(CONNECTION_STATE state)
+inline const char *connection_state_to_string(CONNECTION_STATE state)
 {
     switch (state)
     {
@@ -67,7 +67,7 @@ enum class CONTROL_PACKET_HEADER_FLAGS : uint8_t
     FIN = (1 << 3),
 };
 
-std::string control_flags_to_string(uint8_t flags)
+inline std::string control_flags_to_string(uint8_t flags)
 {
     std::string s;
     if (flags & static_cast<uint8_t>(CONTROL_PACKET_HEADER_FLAGS::SYN))
@@ -84,52 +84,10 @@ std::string control_flags_to_string(uint8_t flags)
         s.pop_back();
     return s;
 }
-struct connection_state_machine
-    : public std::enable_shared_from_this<connection_state_machine>
+
+class connection_state_machine : public std::enable_shared_from_this<connection_state_machine>
 {
-    std::mutex g_connection_state_machine_mutex;
-
-    static constexpr uint32_t ROUND_TRIP_TIME = 2000;
-
-    std::atomic<CONNECTION_STATE> current_state = CONNECTION_STATE::SYN_SENT;
-
-    std::function<void(uint8_t)> on_send_control_packet_to_transport;
-    std::shared_ptr<i_timer_service> global_timer_manager;
-
-    connection_state_machine(std::function<void(uint8_t)> f,
-                             std::shared_ptr<i_timer_service> timer_man)
-        : current_state(CONNECTION_STATE::SYN_SENT),
-          on_send_control_packet_to_transport(f),
-          global_timer_manager(timer_man)
-    {
-        LOG_INFO("[connection_state_machine::connection_state_machine] FSM initialized in state: "
-                 << connection_state_to_string(current_state.load()));
-    }
-
-    ~connection_state_machine()
-    {
-        std::lock_guard<std::mutex> lg(g_connection_state_machine_mutex);
-        if (current_state.load() != CONNECTION_STATE::CLOSED)
-        {
-            LOG_WARN("[connection_state_machine::~connection_state_machine] FSM destructed while in state: "
-                     << connection_state_to_string(current_state.load())
-                     << ". Sending RST.");
-            last_response = {get_rst_flag(), true};
-            send_response_to_network_without_piggybacking_nolock();
-        }
-        else
-        {
-            LOG_INFO("[connection_state_machine::~connection_state_machine] FSM destructed gracefully in CLOSED state.");
-        }
-    }
-
-    bool can_exchange_data()
-    {
-        std::lock_guard<std::mutex> lg(g_connection_state_machine_mutex);
-        return current_state.load() == CONNECTION_STATE::SYN_SENT ||
-               current_state.load() == CONNECTION_STATE::ESTABLISHED;
-    }
-
+public:
     struct fsm_result
     {
         bool close_connection = false;
@@ -142,38 +100,51 @@ struct connection_state_machine
         bool to_send = false;
     };
 
-    to_send_response last_response;
-    TimerInfoTimePoint last_ack_send_time;
-
-    // ------------------------------------------------------------
-    // NOLOCK HELPERS
-    // ------------------------------------------------------------
-
-    void set_last_ack_sent_time_nolock()
+    connection_state_machine(std::function<void(uint8_t)> f, std::shared_ptr<i_timer_service> timer_man)
+        : current_state(CONNECTION_STATE::SYN_SENT),
+          on_send_control_packet_to_transport(f),
+          global_timer_manager(timer_man)
     {
-        last_ack_send_time = std::chrono::steady_clock::now();
+        LOG_INFO("[connection_state_machine] FSM initialized in state: " << connection_state_to_string(current_state.load()));
     }
 
-    void send_response_to_network_without_piggybacking_nolock()
+    ~connection_state_machine()
     {
-        if (!last_response.to_send)
-            return;
-
-        if (last_response.response_flags & get_ack_flag())
-            set_last_ack_sent_time_nolock();
-
-        LOG_INFO("[connection_state_machine::send_response_to_network_without_piggybacking] Sending standalone control packet with flags: "
-                 << control_flags_to_string(last_response.response_flags)
-                 << ". Current state: "
-                 << connection_state_to_string(current_state.load()));
-
-        on_send_control_packet_to_transport(last_response.response_flags);
-        last_response.to_send = false;
+        std::lock_guard<std::mutex> lg(g_connection_state_machine_mutex);
+        if (current_state.load() != CONNECTION_STATE::CLOSED)
+        {
+            LOG_WARN("[connection_state_machine] FSM destructed while in state: "
+                     << connection_state_to_string(current_state.load()) << ". Sending RST.");
+            last_response = {get_rst_flag(), true};
+            send_response_to_network_without_piggybacking_nolock();
+        }
+        else
+        {
+            LOG_INFO("[connection_state_machine] FSM destructed gracefully in CLOSED state.");
+        }
     }
 
+    // Special 5: Delete Copy and Move
+    connection_state_machine(const connection_state_machine &) = delete;
+    connection_state_machine &operator=(const connection_state_machine &) = delete;
+    connection_state_machine(connection_state_machine &&) = delete;
+    connection_state_machine &operator=(connection_state_machine &&) = delete;
+
     // ------------------------------------------------------------
-    // PUBLIC FUNCTIONS
+    // PUBLIC API
     // ------------------------------------------------------------
+
+    bool can_exchange_data()
+    {
+        std::lock_guard<std::mutex> lg(g_connection_state_machine_mutex);
+        return current_state.load() == CONNECTION_STATE::SYN_SENT ||
+               current_state.load() == CONNECTION_STATE::ESTABLISHED;
+    }
+
+    CONNECTION_STATE get_current_state() const
+    {
+        return current_state.load();
+    }
 
     to_send_response get_to_send_response()
     {
@@ -191,10 +162,7 @@ struct connection_state_machine
 
         if (toret.to_send)
         {
-            LOG_INFO("[connection_state_machine::get_to_send_response] Piggybacking control flags: "
-                     << control_flags_to_string(toret.response_flags)
-                     << ". Current state: "
-                     << connection_state_to_string(current_state.load()));
+            LOG_INFO("[connection_state_machine] Piggybacking flags: " << control_flags_to_string(toret.response_flags));
         }
 
         return toret;
@@ -204,70 +172,6 @@ struct connection_state_machine
     {
         std::lock_guard<std::mutex> lg(g_connection_state_machine_mutex);
         send_response_to_network_without_piggybacking_nolock();
-    }
-
-    uint8_t get_ack_flag() const { return uint8_t(CONTROL_PACKET_HEADER_FLAGS::ACK); }
-    uint8_t get_rst_flag() const { return uint8_t(CONTROL_PACKET_HEADER_FLAGS::RST); }
-    uint8_t get_fin_flag() const { return uint8_t(CONTROL_PACKET_HEADER_FLAGS::FIN); }
-    uint8_t get_syn_flag() const { return uint8_t(CONTROL_PACKET_HEADER_FLAGS::SYN); }
-
-    void last_ack_cb_with_retry(int retries_left = 5)
-    {
-        std::lock_guard<std::mutex> lg(g_connection_state_machine_mutex);
-
-        if (current_state.load() != CONNECTION_STATE::LAST_ACK || retries_left <= 0)
-            return;
-
-        LOG_INFO("[connection_state_machine::last_ack_cb_with_retry] LAST_ACK retry "
-                 << std::to_string(6 - retries_left) << "/5");
-
-        last_response = {get_fin_flag(), true};
-        send_response_to_network_without_piggybacking_nolock();
-
-        if (retries_left > 1)
-        {
-            std::weak_ptr<connection_state_machine> self_weak_ptr = shared_from_this();
-
-            global_timer_manager->add_timer(std::make_shared<timer_info>(
-                duration_ms(ROUND_TRIP_TIME * 2),
-                [self_weak_ptr, retries_left]()
-                {
-                    if (auto sp = self_weak_ptr.lock())
-                        sp->last_ack_cb_with_retry(retries_left - 1);
-                }));
-        }
-        else
-        {
-            LOG_WARN("[connection_state_machine::last_ack_cb_with_retry] LAST_ACK retries exhausted");
-        }
-    }
-
-    void time_wait_cb_with_retry(int retries_left = 5)
-    {
-        std::lock_guard<std::mutex> lg(g_connection_state_machine_mutex);
-
-        duration_ms time_spent =
-            std::chrono::duration_cast<duration_ms>(
-                std::chrono::steady_clock::now() - last_ack_send_time);
-
-        if (retries_left > 0 &&
-            time_spent < duration_ms(ROUND_TRIP_TIME * 2))
-        {
-            std::weak_ptr<connection_state_machine> self_weak_ptr = shared_from_this();
-
-            global_timer_manager->add_timer(std::make_shared<timer_info>(
-                duration_ms(ROUND_TRIP_TIME * 2),
-                [self_weak_ptr, retries_left]()
-                {
-                    if (auto sp = self_weak_ptr.lock())
-                        sp->time_wait_cb_with_retry(retries_left - 1);
-                }));
-        }
-        else
-        {
-            current_state.store(CONNECTION_STATE::CLOSED);
-            LOG_INFO("[connection_state_machine::time_wait_cb_with_retry] Transition: TIME_WAIT -> CLOSED (2*RTT elapsed).");
-        }
     }
 
     void on_server_disconnected()
@@ -285,16 +189,16 @@ struct connection_state_machine
         if (old_state == CONNECTION_STATE::ESTABLISHED)
         {
             current_state.store(CONNECTION_STATE::LAST_ACK);
-            LOG_INFO("[connection_state_machine::close] Application requested close. Transitioning to LAST_ACK state. Sending FIN.");
+            LOG_INFO("[connection_state_machine] App requested close. ESTABLISHED -> LAST_ACK. Sending FIN.");
 
-            last_ack_cb_with_retry();
+            // Call the _nolock version because we already hold the mutex
+            last_ack_cb_with_retry_nolock();
             return {false, false};
         }
         else
         {
-            LOG_WARN("[connection_state_machine::close] Application requested close from state: "
-                     << connection_state_to_string(old_state)
-                     << ". Sending RST and forcing CLOSED.");
+            LOG_WARN("[connection_state_machine] App requested close from state: "
+                     << connection_state_to_string(old_state) << ". Sending RST.");
 
             last_response = {get_rst_flag(), true};
             send_response_to_network_without_piggybacking_nolock();
@@ -308,14 +212,12 @@ struct connection_state_machine
     {
         std::lock_guard<std::mutex> lg(g_connection_state_machine_mutex);
 
-        LOG_INFO("[connection_state_machine::handle_change] Received flags: "
-                 << control_flags_to_string(rcvd_flags)
-                 << ". Current state: "
-                 << connection_state_to_string(current_state.load()));
+        LOG_INFO("[connection_state_machine] handle_change flags: " << control_flags_to_string(rcvd_flags)
+                                                                    << " State: " << connection_state_to_string(current_state.load()));
 
         if (current_state.load() == CONNECTION_STATE::CLOSED)
         {
-            LOG_WARN("[connection_state_machine::handle_change] Received packet in CLOSED state. Sending RST and ignoring.");
+            LOG_WARN("[connection_state_machine] Packet in CLOSED state. Sending RST.");
             last_response = {get_rst_flag(), true};
             send_response_to_network_without_piggybacking_nolock();
             return {false, false};
@@ -323,13 +225,13 @@ struct connection_state_machine
 
         if (last_response.to_send)
         {
-            LOG_WARN("[connection_state_machine::handle_change] Pending control packet to send. Sending it now without piggybacking to avoid delay.");
+            LOG_WARN("[connection_state_machine] Sending pending control packet immediately.");
             send_response_to_network_without_piggybacking_nolock();
         }
 
         if (rcvd_flags & get_rst_flag())
         {
-            LOG_CRITICAL("[connection_state_machine::handle_change] Received RST flag. Forcing transition to CLOSED.");
+            LOG_CRITICAL("[connection_state_machine] Received RST. Forcing CLOSED.");
             current_state.store(CONNECTION_STATE::CLOSED);
             return {true, true};
         }
@@ -343,13 +245,7 @@ struct connection_state_machine
             {
                 current_state.store(CONNECTION_STATE::ESTABLISHED);
                 last_response = {0, false};
-                LOG_INFO("[connection_state_machine::handle_change] Transition: SYN_SENT -> ESTABLISHED (Received ACK).");
-            }
-            else
-            {
-                LOG_WARN("[connection_state_machine::handle_change] SYN_SENT: Unexpected flags received: "
-                         << control_flags_to_string(rcvd_flags)
-                         << ". Ignoring.");
+                LOG_INFO("[connection_state_machine] SYN_SENT -> ESTABLISHED (ACK).");
             }
             break;
 
@@ -357,13 +253,10 @@ struct connection_state_machine
             if (rcvd_flags == get_fin_flag())
             {
                 current_state.store(CONNECTION_STATE::TIME_WAIT);
-
                 last_response = {get_ack_flag(), true};
                 send_response_to_network_without_piggybacking_nolock();
-
-                LOG_INFO("[connection_state_machine::handle_change] Transition: ESTABLISHED -> TIME_WAIT (Received FIN, sending ACK).");
-
-                time_wait_cb_with_retry();
+                LOG_INFO("[connection_state_machine] ESTABLISHED -> TIME_WAIT (FIN).");
+                time_wait_cb_with_retry_nolock();
                 return {false, true};
             }
             break;
@@ -373,7 +266,7 @@ struct connection_state_machine
             {
                 last_response = {get_ack_flag(), true};
                 send_response_to_network_without_piggybacking_nolock();
-                LOG_WARN("[connection_state_machine::handle_change] TIME_WAIT: Received duplicate FIN (ACK likely lost). Re-sending ACK.");
+                LOG_WARN("[connection_state_machine] TIME_WAIT: Duplicate FIN received. Resending ACK.");
             }
             break;
 
@@ -381,27 +274,119 @@ struct connection_state_machine
             if (rcvd_flags == get_ack_flag())
             {
                 current_state.store(CONNECTION_STATE::CLOSED);
-                LOG_INFO("[connection_state_machine::handle_change] Transition: LAST_ACK -> CLOSED (Received ACK for FIN).");
+                LOG_INFO("[connection_state_machine] LAST_ACK -> CLOSED (ACK).");
                 return {true, false};
             }
             break;
 
         default:
-            LOG_ERROR("[connection_state_machine::handle_change] FSM in unhandled state: "
-                      << connection_state_to_string(current_state.load())
-                      << " with flags: "
-                      << control_flags_to_string(rcvd_flags)
-                      << ". Ignoring.");
             break;
         }
 
         return {false, false};
     }
+
+private:
+    std::mutex g_connection_state_machine_mutex;
+    static constexpr uint32_t ROUND_TRIP_TIME = 2000;
+
+    std::atomic<CONNECTION_STATE> current_state;
+    std::function<void(uint8_t)> on_send_control_packet_to_transport;
+    std::shared_ptr<i_timer_service> global_timer_manager;
+
+    to_send_response last_response;
+    TimerInfoTimePoint last_ack_send_time;
+
+    // ------------------------------------------------------------
+    // INTERNAL HELPERS
+    // ------------------------------------------------------------
+
+    uint8_t get_ack_flag() const { return uint8_t(CONTROL_PACKET_HEADER_FLAGS::ACK); }
+    uint8_t get_rst_flag() const { return uint8_t(CONTROL_PACKET_HEADER_FLAGS::RST); }
+    uint8_t get_fin_flag() const { return uint8_t(CONTROL_PACKET_HEADER_FLAGS::FIN); }
+    uint8_t get_syn_flag() const { return uint8_t(CONTROL_PACKET_HEADER_FLAGS::SYN); }
+
+    void set_last_ack_sent_time_nolock()
+    {
+        last_ack_send_time = std::chrono::steady_clock::now();
+    }
+
+    void send_response_to_network_without_piggybacking_nolock()
+    {
+        if (!last_response.to_send)
+            return;
+
+        if (last_response.response_flags & get_ack_flag())
+            set_last_ack_sent_time_nolock();
+
+        LOG_INFO("[connection_state_machine] Sending standalone control flags: " << control_flags_to_string(last_response.response_flags));
+        on_send_control_packet_to_transport(last_response.response_flags);
+        last_response.to_send = false;
+    }
+
+    void last_ack_cb_with_retry_nolock(int retries_left = 5)
+    {
+        // Internal logic assumes lock is ALREADY held
+        if (current_state.load() != CONNECTION_STATE::LAST_ACK || retries_left <= 0)
+            return;
+
+        LOG_INFO("[connection_state_machine] LAST_ACK retry " << std::to_string(6 - retries_left) << "/5");
+
+        last_response = {get_fin_flag(), true};
+        send_response_to_network_without_piggybacking_nolock();
+
+        if (retries_left > 1)
+        {
+            std::weak_ptr<connection_state_machine> self_weak_ptr = shared_from_this();
+            global_timer_manager->add_timer(std::make_shared<timer_info>(
+                duration_ms(ROUND_TRIP_TIME * 2),
+                [self_weak_ptr, retries_left]()
+                {
+                    if (auto sp = self_weak_ptr.lock())
+                    {
+                        // Re-acquire lock in the callback context
+                        std::lock_guard<std::mutex> lg(sp->g_connection_state_machine_mutex);
+                        sp->last_ack_cb_with_retry_nolock(retries_left - 1);
+                    }
+                }));
+        }
+        else
+        {
+            LOG_WARN("[connection_state_machine] LAST_ACK retries exhausted");
+        }
+    }
+
+    void time_wait_cb_with_retry_nolock(int retries_left = 5)
+    {
+        // Internal logic assumes lock is ALREADY held
+        duration_ms time_spent = std::chrono::duration_cast<duration_ms>(
+            std::chrono::steady_clock::now() - last_ack_send_time);
+
+        if (retries_left > 0 && time_spent < duration_ms(ROUND_TRIP_TIME * 2))
+        {
+            std::weak_ptr<connection_state_machine> self_weak_ptr = shared_from_this();
+            global_timer_manager->add_timer(std::make_shared<timer_info>(
+                duration_ms(ROUND_TRIP_TIME * 2),
+                [self_weak_ptr, retries_left]()
+                {
+                    if (auto sp = self_weak_ptr.lock())
+                    {
+                        // Re-acquire lock in the callback context
+                        std::lock_guard<std::mutex> lg(sp->g_connection_state_machine_mutex);
+                        sp->time_wait_cb_with_retry_nolock(retries_left - 1);
+                    }
+                }));
+        }
+        else
+        {
+            current_state.store(CONNECTION_STATE::CLOSED);
+            LOG_INFO("[connection_state_machine] TIME_WAIT -> CLOSED (2*RTT elapsed).");
+        }
+    }
 };
 
 class session_control : public i_session_control_for_udp, public i_session_control_for_channel_manager, public std::enable_shared_from_this<session_control>
 {
-
     std::shared_ptr<i_timer_service> global_timer_manager;
     std::shared_ptr<i_udp_for_session_control> udp_ptr;
     std::weak_ptr<i_channel_manager_for_session_control> channel_manager_ptr;
@@ -420,7 +405,6 @@ class session_control : public i_session_control_for_udp, public i_session_contr
     void add_session_control_header(rudp_protocol_packet &pkt)
     {
         assert(client_fsm != nullptr);
-
         connection_state_machine::to_send_response res = client_fsm->get_to_send_response();
         session_control_header header;
         header.flags = 0, header.reserved = 0;
@@ -435,7 +419,7 @@ class session_control : public i_session_control_for_udp, public i_session_contr
 
         if (res.to_send)
         {
-            LOG_INFO("Added session control header with flags: " << control_flags_to_string(res.response_flags) << " to outgoing packet.");
+            LOG_INFO("Added session control header with flags: " << control_flags_to_string(res.response_flags));
         }
     }
 
@@ -443,8 +427,7 @@ class session_control : public i_session_control_for_udp, public i_session_contr
     {
         if (client_fsm && client_fsm->can_exchange_data())
             return true;
-
-        LOG_WARN("Data exchange blocked. Current FSM state: " << connection_state_to_string(client_fsm ? client_fsm->current_state.load() : CONNECTION_STATE::CLOSED));
+        LOG_WARN("Data exchange blocked. FSM state: " << connection_state_to_string(client_fsm ? client_fsm->get_current_state() : CONNECTION_STATE::CLOSED));
         return false;
     }
 
@@ -452,23 +435,21 @@ class session_control : public i_session_control_for_udp, public i_session_contr
     {
         if (!client_fsm)
         {
-            LOG_CRITICAL("FSM is null during packet parse. Dropping packet.");
+            LOG_CRITICAL("FSM is null during parse. Dropping.");
             return;
         }
 
         uint8_t flags;
         uint32_t reserved_net;
-
-        const uint8_t *buf = reinterpret_cast<const uint8_t *>(
-            incoming_pkt.get_const_buffer());
+        const uint8_t *buf = reinterpret_cast<const uint8_t *>(incoming_pkt.get_const_buffer());
 
         std::memcpy(&flags, buf, sizeof(flags));
         std::memcpy(&reserved_net, buf + sizeof(flags), sizeof(reserved_net));
 
-        uint32_t reserved = ntohl(reserved_net);
-
         connection_state_machine::fsm_result res = client_fsm->handle_change(flags & ((uint8_t(1) << 4) - 1));
-        LOG_INFO("Parsed session control header with flags: " << control_flags_to_string(flags & ((uint8_t(1) << 4) - 1)) << ". FSM result: close_connection=" << res.close_connection << ", stop_data_exchange=" << res.stop_data_exchange);
+
+        LOG_INFO("Parsed flags: " << control_flags_to_string(flags & ((uint8_t(1) << 4) - 1))
+                                  << ". Close=" << res.close_connection << ", Stop=" << res.stop_data_exchange);
 
         if (res.close_connection)
             trigger_teardown_step();
@@ -479,7 +460,7 @@ class session_control : public i_session_control_for_udp, public i_session_contr
             {
                 sp->on_server_disconnected();
                 trigger_teardown_step();
-                LOG_CRITICAL("FSM indicated stop data exchange. Notifying channel manager of server disconnect.");
+                LOG_CRITICAL("FSM indicated stop data exchange.");
             }
         }
     }
@@ -493,10 +474,14 @@ public:
         client_setup_access_key() {}
     };
 
-    session_control()
-    {
-        LOG_INFO("session_control object created.");
-    }
+    session_control() { LOG_INFO("session_control object created."); }
+    ~session_control() = default;
+
+    // Special 5: Delete Copy and Move
+    session_control(const session_control &) = delete;
+    session_control &operator=(const session_control &) = delete;
+    session_control(session_control &&) = delete;
+    session_control &operator=(session_control &&) = delete;
 
     void initialize_fsm_after_dependencies()
     {
@@ -523,33 +508,31 @@ public:
     {
         channel_manager_ptr = channel_manager_;
     }
+
     void on_close_client() override
     {
         trigger_teardown_step();
-
         connection_state_machine::fsm_result res = client_fsm->close();
         if (res.close_connection)
             trigger_teardown_step();
 
-        LOG_INFO("Teardowncounter value : ." << std::to_string(teardown_counter->load()));
+        LOG_INFO("Teardown counter: " << std::to_string(teardown_counter->load()));
 
         if (teardown_counter->load() < 2)
         {
-            LOG_INFO("Teardown not complete. Starting polling timer.");
+            LOG_INFO("Teardown not complete. Starting polling.");
             auto this_shared_ptr = shared_from_this();
             std::function<void()> cb = [this_shared_ptr, cb]
             {
                 if (this_shared_ptr->teardown_counter->load() < 2)
                 {
-                    LOG_INFO("Teardown polling timer tick. Counter < 2. Rescheduling.");
                     this_shared_ptr->global_timer_manager->add_timer(std::make_shared<timer_info>(duration_ms(100), cb));
                 }
                 else
                 {
-                    LOG_INFO("Teardown complete (Counter >= 2). Stopping polling.");
+                    LOG_INFO("Teardown complete. Stopping polling.");
                 }
             };
-
             global_timer_manager->add_timer(std::make_shared<timer_info>(duration_ms(100), cb));
         }
     }
@@ -558,19 +541,19 @@ public:
     {
         if (!client_fsm)
         {
-            LOG_CRITICAL("Received packet but client_fsm is null. Dropping.");
+            LOG_CRITICAL("Received packet but client_fsm is null.");
             return;
         }
-
         if (pkt->get_length() < rudp_protocol_packet::SESSION_CONTROL_HEADER_OFFSET + rudp_protocol_packet::SESSION_CONTROL_HEADER_SIZE)
         {
-            LOG_CRITICAL("Received packet but too small for session control. Dropping.");
+            LOG_CRITICAL("Received packet too small.");
             return;
         }
 
         parse_session_control_packet_header(*pkt);
 
         if (verify_can_exchange_data())
+        {
             if (auto cm_sp = channel_manager_ptr.lock())
             {
                 cm_sp->on_transport_receive(std::move(pkt));
@@ -578,13 +561,15 @@ public:
             }
             else
             {
-                LOG_WARN("Data received, FSM allows exchange, but channel manager is null/expired. Dropping data.");
+                LOG_WARN("Channel manager is null.");
             }
+        }
         else
         {
-            LOG_WARN("Data exchange not allowed by FSM. Dropping received data packet.");
+            LOG_WARN("Data exchange not allowed by FSM.");
         }
     }
+
     void on_server_disconnected() override
     {
         auto sp = channel_manager_ptr.lock();
@@ -597,19 +582,18 @@ public:
     {
         if (!client_fsm)
         {
-            LOG_CRITICAL("Attempted to send data but client_fsm is null. Dropping.");
+            LOG_CRITICAL("Attempted to send data but client_fsm is null.");
             return;
         }
-
         if (verify_can_exchange_data())
         {
             add_session_control_header(*pkt);
             udp_ptr->send_packet_to_network(pkt->get_buffer(), pkt->get_length());
-            LOG_INFO("Sending data packet to network via UDP.");
+            LOG_INFO("Sending data packet to network.");
         }
         else
         {
-            LOG_WARN("Data exchange not allowed by FSM. Dropping data packet for transmission.");
+            LOG_WARN("Data exchange not allowed by FSM. Dropping.");
         }
     }
 };

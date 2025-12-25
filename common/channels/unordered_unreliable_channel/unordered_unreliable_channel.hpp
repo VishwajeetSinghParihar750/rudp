@@ -176,6 +176,12 @@ namespace unordered_unreliable_channel
         {
             LOG_INFO("Unordered Unreliable Channel " << ch_id << " created.");
         }
+          ~unordered_unreliable_channel() = default;
+        unordered_unreliable_channel(const unordered_unreliable_channel &) = delete;
+        unordered_unreliable_channel(unordered_unreliable_channel &&) = delete;
+        void operator=(const unordered_unreliable_channel &) = delete;
+        void operator=(unordered_unreliable_channel &&) = delete;
+        //
 
         std::unique_ptr<i_channel> clone() const override
         {

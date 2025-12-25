@@ -93,15 +93,16 @@ namespace ordered_unreliable_channel
             while (sz > 0 && !data.empty())
             {
                 auto &pkt = data.front();
-                
+
                 uint32_t header_reserve = rudp_protocol_packet::CHANNEL_HEADER_OFFSET + channel_config::HEADER_SIZE;
                 uint32_t pkt_len = pkt->get_length();
-                
+
                 // Safety check for malformed packets smaller than header
-                if (pkt_len <= header_reserve) {
+                if (pkt_len <= header_reserve)
+                {
                     data.pop_front();
                     head_read_offset = 0;
-                    continue; 
+                    continue;
                 }
 
                 uint32_t packet_payload_len = pkt_len - header_reserve;
@@ -133,12 +134,14 @@ namespace ordered_unreliable_channel
 
         bool put_rudp_protocol_packet(std::unique_ptr<rudp_protocol_packet> pkt)
         {
-            if (!pkt) return false;
+            if (!pkt)
+                return false;
 
             uint32_t pkt_len = pkt->get_length();
             uint32_t reserve = rudp_protocol_packet::CHANNEL_HEADER_OFFSET + channel_config::HEADER_SIZE;
 
-            if (pkt_len <= reserve) return false;
+            if (pkt_len <= reserve)
+                return false;
 
             uint32_t payload = pkt_len - reserve;
 
@@ -170,7 +173,7 @@ namespace ordered_unreliable_channel
             {
                 cycle = !cycle;
             }
-            
+
             if (cycle)
             {
                 out_header.flags |= uint8_t(channel_header_flags::CYCLE);
@@ -194,7 +197,8 @@ namespace ordered_unreliable_channel
 
         bool receive_packet(std::unique_ptr<rudp_protocol_packet> pkt)
         {
-            if (!pkt) return false;
+            if (!pkt)
+                return false;
 
             char *packet_ptr = pkt->get_buffer() + rudp_protocol_packet::CHANNEL_HEADER_OFFSET;
             uint32_t packet_size = pkt->get_length() - rudp_protocol_packet::CHANNEL_HEADER_OFFSET;
@@ -208,10 +212,10 @@ namespace ordered_unreliable_channel
             // Ordered Unreliable Logic:
             // We accept if Sequence is NEWER than expected (gap/jump ahead)
             // OR if Cycle flag changed (wrap around)
-            
+
             // Note: simple (seq >= expected) check fails on wrap-around boundary without cycle flag logic.
             // The Cycle flag handles the uint32 overflow ambiguity.
-            
+
             bool is_newer = false;
             if (new_cycle != last_cycle)
             {
@@ -226,7 +230,7 @@ namespace ordered_unreliable_channel
             if (is_newer)
             {
                 uint32_t payload_len = packet_size - channel_config::HEADER_SIZE;
-                
+
                 // Try to buffer
                 if (buffer.put_rudp_protocol_packet(std::move(pkt)))
                 {
@@ -258,9 +262,9 @@ namespace ordered_unreliable_channel
           public std::enable_shared_from_this<ordered_unreliable_channel>
     {
         channel_id ch_id;
-        
+
         // We replaced send_window with lightweight state since we don't queue
-        send_state snd_state; 
+        send_state snd_state;
         receive_window rcv_window;
 
         std::function<void()> on_app_data_ready;
@@ -274,7 +278,12 @@ namespace ordered_unreliable_channel
         {
             LOG_INFO("Ordered Unreliable Channel " << ch_id << " created");
         }
-
+        ~ordered_unreliable_channel() = default;
+        ordered_unreliable_channel(const ordered_unreliable_channel &) = delete;
+        ordered_unreliable_channel(ordered_unreliable_channel &&) = delete;
+        void operator=(const ordered_unreliable_channel &) = delete;
+        void operator=(ordered_unreliable_channel &&) = delete;
+        //
         std::unique_ptr<i_channel> clone() const override
         {
             return nullptr;
@@ -282,13 +291,15 @@ namespace ordered_unreliable_channel
 
         void on_transport_receive(std::unique_ptr<rudp_protocol_packet> pkt) override
         {
-            if (!pkt) return;
+            if (!pkt)
+                return;
 
             std::lock_guard<std::mutex> lock(mutex_);
 
             if (rcv_window.receive_packet(std::move(pkt)))
             {
-                if (on_app_data_ready) on_app_data_ready();
+                if (on_app_data_ready)
+                    on_app_data_ready();
             }
         }
 
@@ -296,35 +307,35 @@ namespace ordered_unreliable_channel
         {
             std::lock_guard<std::mutex> lock(mutex_);
             ssize_t ret = rcv_window.read_data(buf, len);
-            
+
             // If more data remains, notify app again
             if (rcv_window.get_available_bytes_cnt() > 0 && on_app_data_ready)
                 on_app_data_ready();
-                
+
             return ret;
         }
 
         ssize_t write_bytes_from_application(const char *buf, const uint32_t &len) override
         {
             // Direct Send Optimization (No Queue)
-            
+
             uint32_t total_len = len + rudp_protocol_packet::CHANNEL_HEADER_OFFSET + channel_config::HEADER_SIZE;
-            
+
             // 1. Alloc Packet
             auto pkt = std::make_unique<rudp_protocol_packet>(total_len);
             pkt->set_length(total_len);
-            
+
             {
                 std::lock_guard<std::mutex> lock(mutex_);
-                
+
                 // 2. Generate Header & Seq No
                 channel_header h{};
                 snd_state.get_next_header(len, h);
-                
+
                 // 3. Serialize Header
                 char *header_ptr = pkt->get_buffer() + rudp_protocol_packet::CHANNEL_HEADER_OFFSET;
                 packet_codec::serialize_header(header_ptr, h);
-                
+
                 // 4. Copy Payload
                 memcpy(header_ptr + channel_config::HEADER_SIZE, buf, len);
             }

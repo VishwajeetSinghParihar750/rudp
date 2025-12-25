@@ -248,6 +248,14 @@ class channel_manager : public i_server, public i_channel_manager_for_session_co
     }
 
 public:
+    channel_manager() = default;
+    ~channel_manager() = default;
+    // explictly deleting copy/move
+    channel_manager(const channel_manager &) = delete;
+    channel_manager &operator=(const channel_manager &) = delete;
+    channel_manager(channel_manager &&) = delete;
+    channel_manager &operator=(channel_manager &&) = delete;
+
     // selective access
     class server_setup_access_key
     {
@@ -428,7 +436,7 @@ public:
 
         if (pkt->get_length() < rudp_protocol_packet::CHANNEL_MANAGER_HEADER_OFFSET + rudp_protocol_packet::CHANNEL_MANAGER_HEADER_SIZE)
         {
-            LOG_ERROR(" packet too small for channel manager, most likely control packet  ");
+            LOG_INFO(" packet too small for channel manager, most likely control packet  ");
             return;
         }
 

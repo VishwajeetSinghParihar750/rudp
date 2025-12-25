@@ -11,9 +11,7 @@ using channel_id = uint64_t;
 using client_id = uint64_t;
 inline constexpr channel_id INVALID_CHANNEL_ID = 0;
 inline constexpr client_id INVALID_CLIENT_ID = 0;
-inline constexpr channel_id CONTROL_CHANNEL_ID = 0;
 
-inline constexpr uint16_t MAX_CHANNEL_PACKET_SIZE = 65000;
 enum class channel_type : uint16_t
 {
     RELIABLE_ORDERED_CHANNEL = 0,
