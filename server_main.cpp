@@ -5,7 +5,7 @@
 #include <map>
 #include "server/server_setup.hpp"
 
-static constexpr size_t BUF_SIZE = 1024 * 1024;
+static constexpr size_t BUF_SIZE =8 * 1024 * 1024;
 
 int main()
 {

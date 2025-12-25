@@ -287,8 +287,8 @@ public:
         {
             if (errno != EAGAIN && errno != EWOULDBLOCK)
             {
-                LOG_ERROR("[send] send failed: "
-                          << strerror(errno));
+                LOG_ERROR("[send] send failed: " << "len " << len
+                                                 << strerror(errno));
                 server_closed.store(true);
                 if (auto sp = session_control_.lock())
                     sp->on_server_disconnected();

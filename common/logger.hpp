@@ -12,7 +12,7 @@ class logger
     bool error_on = true;
     bool warning_on = true;
     bool test_on = false;
-    bool critical_on = true;
+    bool critical_on = false;
     std::mutex log_mutex;
 
     logger() = default;

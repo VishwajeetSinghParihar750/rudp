@@ -22,7 +22,7 @@
 
 namespace reliable_ordered_channel
 {
-    // ... (Sequence number comparison helpers remain the same) ...
+    // ... (Sequence number comparison helpers) ...
     inline bool seq_lt(uint32_t a, uint32_t b) { return (int32_t)(a - b) < 0; }
     inline bool seq_le(uint32_t a, uint32_t b) { return (int32_t)(a - b) <= 0; }
     inline bool seq_gt(uint32_t a, uint32_t b) { return (int32_t)(a - b) > 0; }
@@ -31,12 +31,11 @@ namespace reliable_ordered_channel
     namespace channel_config
     {
         constexpr uint16_t HEADER_SIZE = 16;
-        constexpr uint32_t DEFAULT_BUFFER_SIZE = 1024 * 1024;
-        constexpr uint16_t MAX_MSS = 32 * 1024; // Large MSS as per your config
+        constexpr uint32_t DEFAULT_BUFFER_SIZE = 4 * 1024 * 1024;
+        constexpr uint16_t MAX_MSS = 32 * 1024 - HEADER_SIZE - rudp_protocol_packet::CHANNEL_HEADER_OFFSET;
         constexpr uint64_t RTO_MS = 200;
         constexpr uint32_t MAX_RETRANSMITS = 15;
 
-        // Total reserve: internal protocol headers + channel header
         constexpr size_t TOTAL_HEADER_RESERVE =
             rudp_protocol_packet::CHANNEL_HEADER_OFFSET + HEADER_SIZE;
     }
@@ -64,7 +63,6 @@ namespace reliable_ordered_channel
         {
             if (sz < channel_config::HEADER_SIZE)
                 return false;
-            // Using memcpy to avoid strict aliasing issues, compiler optimizes this to mov
             uint32_t seq, ack;
             uint16_t win, flg, csum;
 
@@ -100,11 +98,10 @@ namespace reliable_ordered_channel
 
     /* ================= PACKET WRAPPER ================= */
 
-    // Helper to track sequence numbers with packets
     struct packet_entry
     {
         uint32_t start_seq;
-        std::shared_ptr<rudp_protocol_packet> pkt;
+        std::shared_ptr<rudp_protocol_packet> pkt; // Using shared_ptr for safety
 
         uint32_t payload_len() const
         {
@@ -117,21 +114,20 @@ namespace reliable_ordered_channel
         }
     };
 
-    /* ================= RECEIVE WINDOW ================= */
+    /* ================= RECEIVE WINDOW (Single Copy Optimized) ================= */
 
     struct receive_window
     {
-        // Queue of in-order packets ready to be read by app
         std::deque<packet_entry> in_order_q;
-
-        // Out of order storage
         std::map<uint32_t, std::shared_ptr<rudp_protocol_packet>> ooo;
 
         uint32_t rcv_nxt = 0;
-        uint32_t app_read_offset = 0; // Bytes read from the front packet
-        bool ack_pending = false;
 
-        uint32_t window_cap; // Max bytes we want to hold
+        // Single Copy Optimization: Track read offset
+        uint32_t app_read_offset = 0;
+
+        bool ack_pending = false;
+        uint32_t window_cap;
 
     public:
         explicit receive_window(uint32_t cap = channel_config::DEFAULT_BUFFER_SIZE)
@@ -144,7 +140,6 @@ namespace reliable_ordered_channel
 
             uint32_t payload_len = total_sz - channel_config::HEADER_SIZE;
 
-            // Header-only packet (ACK or Probe)
             if (payload_len == 0)
             {
                 if (!(h.flags & (uint8_t)channel_flags::ACK))
@@ -154,7 +149,6 @@ namespace reliable_ordered_channel
 
             uint32_t start = h.seq_no;
 
-            // Only accept if it's within valid window range
             if (seq_ge(start, rcv_nxt))
             {
                 uint32_t buffer_usage = get_buffer_usage();
@@ -164,14 +158,12 @@ namespace reliable_ordered_channel
                 {
                     if (start == rcv_nxt)
                     {
-                        // In-order: push to queue
                         in_order_q.push_back({start, original_pkt});
                         rcv_nxt += payload_len;
                         advance_sack();
                     }
                     else if (ooo.find(start) == ooo.end())
                     {
-                        // Out-of-order: stash it
                         ooo[start] = original_pkt;
                     }
                 }
@@ -194,7 +186,7 @@ namespace reliable_ordered_channel
 
                 uint32_t to_copy = std::min(len, available_in_pkt);
 
-                // Direct copy from packet payload to user buffer
+                // DIRECT MEMCPY (Single Copy)
                 char *pkt_payload_start = front.pkt->get_buffer() + channel_config::TOTAL_HEADER_RESERVE;
                 std::memcpy(dst, pkt_payload_start + app_read_offset, to_copy);
 
@@ -203,7 +195,6 @@ namespace reliable_ordered_channel
                 total_read += to_copy;
                 app_read_offset += to_copy;
 
-                // If packet fully consumed, remove it
                 if (app_read_offset >= pkt_payload_len)
                 {
                     in_order_q.pop_front();
@@ -220,12 +211,9 @@ namespace reliable_ordered_channel
 
         uint32_t available() const
         {
-            // Total bytes available to read across all in-order packets
             uint32_t sum = 0;
             for (const auto &entry : in_order_q)
-            {
                 sum += entry.payload_len();
-            }
             return sum - app_read_offset;
         }
 
@@ -233,7 +221,6 @@ namespace reliable_ordered_channel
 
         uint32_t get_buffer_usage() const
         {
-            // Roughly bytes stored in in_order + ooo
             return available() + get_ooo_size();
         }
 
@@ -241,9 +228,7 @@ namespace reliable_ordered_channel
         {
             uint32_t sum = 0;
             for (auto const &[seq, pkt] : ooo)
-            {
                 sum += (pkt->get_length() - channel_config::TOTAL_HEADER_RESERVE);
-            }
             return sum;
         }
 
@@ -267,11 +252,9 @@ namespace reliable_ordered_channel
                 if (seq != rcv_nxt)
                     break;
 
-                std::shared_ptr<rudp_protocol_packet> pkt = it->second;
+                in_order_q.push_back({seq, it->second});
+                rcv_nxt += in_order_q.back().payload_len();
                 ooo.erase(it);
-
-                in_order_q.push_back({seq, pkt});
-                rcv_nxt += (pkt->get_length() - channel_config::TOTAL_HEADER_RESERVE);
             }
         }
     };
@@ -280,12 +263,11 @@ namespace reliable_ordered_channel
 
     struct send_window
     {
-        // The queue of packets that form our window
         std::deque<packet_entry> packets;
 
-        uint32_t snd_una = 0;   // Sequence of the first byte of the first packet
-        uint32_t snd_nxt = 0;   // Sequence we have sent up to
-        uint32_t write_seq = 0; // Sequence we have written up to (tail of queue)
+        uint32_t snd_una = 0;
+        uint32_t snd_nxt = 0;
+        uint32_t write_seq = 0;
 
         uint32_t remote_win = channel_config::DEFAULT_BUFFER_SIZE;
         uint32_t buffer_cap;
@@ -297,13 +279,12 @@ namespace reliable_ordered_channel
         {
             uint32_t buffered = write_seq - snd_una;
             if (buffered >= buffer_cap)
-                return 0; // Local buffer full
+                return 0;
 
             uint32_t written = 0;
 
             while (len > 0)
             {
-                // Check if we can append to the last packet
                 bool used_existing = false;
                 if (!packets.empty())
                 {
@@ -311,9 +292,6 @@ namespace reliable_ordered_channel
                     size_t current_len = last.pkt->get_length();
                     size_t capacity = last.pkt->get_capacity();
 
-                    // We can append if there is space AND it hasn't been sent yet.
-                    // (Simplification: if snd_nxt > last.start_seq, we consider it "sealed"
-                    // to avoid changing data being transmitted)
                     if (current_len < capacity && seq_lt(last.start_seq, snd_nxt) == false)
                     {
                         size_t space = capacity - current_len;
@@ -332,16 +310,13 @@ namespace reliable_ordered_channel
 
                 if (!used_existing && len > 0)
                 {
-                    // Create new packet
-                    // Max capacity is MSS + Headers
                     size_t alloc_size = channel_config::MAX_MSS + channel_config::TOTAL_HEADER_RESERVE;
-                    auto new_pkt = std::make_shared<rudp_protocol_packet>(alloc_size);
 
-                    // Reserve header space initially
+                    // Standard make_shared (compatible with session logic)
+                    auto new_pkt = std::make_shared<rudp_protocol_packet>(alloc_size);
                     new_pkt->set_length(channel_config::TOTAL_HEADER_RESERVE);
 
                     packets.push_back({write_seq, new_pkt});
-                    // Loop will continue and fill this packet in the next iteration block
                 }
 
                 if (buffered + written >= buffer_cap)
@@ -351,46 +326,23 @@ namespace reliable_ordered_channel
             return written;
         }
 
-        uint32_t get_in_flight() const
-        {
-            return snd_nxt - snd_una;
-        }
+        uint32_t get_in_flight() const { return snd_nxt - snd_una; }
 
-        // Returns a pointer to a packet that needs sending, and fills its header seq
-        // Returns nullptr if nothing to send
         std::shared_ptr<rudp_protocol_packet> get_next_packet_to_send(uint32_t &out_seq)
         {
             uint32_t inflight = snd_nxt - snd_una;
             if (inflight >= remote_win)
                 return nullptr;
 
-            // Find the packet that contains snd_nxt
             for (auto &entry : packets)
             {
-                // Check if this packet starts at or after snd_nxt
-                // Or if snd_nxt is inside this packet (unlikely with full packet sends, but possible)
-                if (seq_ge(snd_nxt, entry.start_seq) && seq_lt(snd_nxt, entry.end_seq()))
+                if ((seq_ge(snd_nxt, entry.start_seq) && seq_lt(snd_nxt, entry.end_seq())) ||
+                    seq_gt(entry.start_seq, snd_nxt))
                 {
-                    // This is the packet to send
                     out_seq = entry.start_seq;
+                    if (seq_gt(entry.start_seq, snd_nxt))
+                        out_seq = entry.start_seq;
 
-                    // Advance snd_nxt to the end of this packet
-                    uint32_t payload_sz = entry.payload_len();
-
-                    // Cap by remote window?
-                    // For simplicity, we send full packets. RUDP usually sends full frames.
-                    // If window is too small for a full packet, we pause (Nagle/Flow Control)
-                    if (inflight + payload_sz > remote_win && inflight > 0)
-                        return nullptr;
-
-                    snd_nxt = entry.end_seq();
-                    return entry.pkt;
-                }
-                else if (seq_gt(entry.start_seq, snd_nxt))
-                {
-                    // snd_nxt is somehow behind packets? Should not happen in linear buffer
-                    // But if it does, this is the next one.
-                    out_seq = entry.start_seq;
                     snd_nxt = entry.end_seq();
                     return entry.pkt;
                 }
@@ -398,7 +350,6 @@ namespace reliable_ordered_channel
             return nullptr;
         }
 
-        // Peek at max payload we *could* send (for Nagle check)
         uint32_t max_payload_pending() const
         {
             if (packets.empty())
@@ -415,19 +366,12 @@ namespace reliable_ordered_channel
             if (seq_ge(ack_no, snd_una) && seq_le(ack_no, snd_nxt))
             {
                 snd_una = ack_no;
-
-                // Remove fully acknowledged packets from the front
                 while (!packets.empty())
                 {
-                    // If the END of the packet is <= ack_no, it is fully acked
                     if (seq_le(packets.front().end_seq(), snd_una))
-                    {
                         packets.pop_front();
-                    }
                     else
-                    {
                         break;
-                    }
                 }
             }
         }
@@ -442,8 +386,8 @@ namespace reliable_ordered_channel
     {
         uint32_t seq, len;
         uint32_t retries;
-        uint32_t ack_rcvd_count = 0; // sender sent an ack  to get this guy , so i will resend immeditalty if this is  == 3
-        std::shared_ptr<rudp_protocol_packet> pkt;
+        uint32_t ack_rcvd_count = 0;
+        std::shared_ptr<rudp_protocol_packet> pkt; // Shared ownership
 
         inflight(uint32_t sequ, uint32_t length, uint32_t retry, std::shared_ptr<rudp_protocol_packet> packet)
             : seq(sequ), len(length), retries(retry), pkt(packet) {}
@@ -465,13 +409,14 @@ namespace reliable_ordered_channel
         std::mutex mtx;
 
         std::function<void()> on_app;
+
+        // STANDARD CALLBACK (No crash, full compatibility)
         std::function<void(std::shared_ptr<rudp_protocol_packet>)> on_net;
+
         std::shared_ptr<i_timer_service> global_timer_manager;
 
         std::shared_ptr<prober> my_prober = nullptr;
         bool to_probe = false;
-
-        // ... (Timer helpers: add_probing_timer_helper, add_rto_timer_helper remain identical) ...
 
         void add_probing_timer_helper(std::weak_ptr<prober> cur_prober_weak)
         {
@@ -489,8 +434,6 @@ namespace reliable_ordered_channel
                             sp->send_nolock();
                             sp->add_probing_timer_helper(cur_prober_weak);
                         }
-                        else
-                            sp = nullptr;
                     }
                 }
             };
@@ -547,16 +490,14 @@ namespace reliable_ordered_channel
             if (!pkt_unique)
                 return;
 
-            // Convert to shared_ptr because we might store it in ooo/in_order maps
+            // Convert unique_ptr to shared_ptr for window ownership
             std::shared_ptr<rudp_protocol_packet> pkt = std::move(pkt_unique);
             bool notify = false;
 
             {
                 std::lock_guard lk(mtx);
                 channel_header h{};
-
-                // Get pointer to channel header (skip session headers)
-                const char *ch_header_ptr = pkt->get_const_buffer() + rudp_protocol_packet::CHANNEL_HEADER_OFFSET;
+                const char *ch_header_ptr = pkt->get_buffer() + rudp_protocol_packet::CHANNEL_HEADER_OFFSET;
                 uint32_t ch_packet_len = pkt->get_length() - rudp_protocol_packet::CHANNEL_HEADER_OFFSET;
 
                 if (!rcv.receive_packet(ch_header_ptr, ch_packet_len, h, pkt))
@@ -567,7 +508,9 @@ namespace reliable_ordered_channel
                     for (auto it = inflight_q.begin(); it != inflight_q.end();)
                     {
                         if (seq_le((*it)->seq + (*it)->len, h.ack_no))
+                        {
                             it = inflight_q.erase(it);
+                        }
                         else if ((*it)->seq == h.ack_no)
                         {
                             if (((++((*it)->ack_rcvd_count)) % 3) == 0)
@@ -578,10 +521,13 @@ namespace reliable_ordered_channel
                             break;
                         }
                         else
+                        {
                             break;
+                        }
                     }
 
                     snd.ack(h.ack_no);
+
                     uint32_t prev_win = snd.get_window();
                     snd.update_window(h.win_sz);
                     if (prev_win > 0 && snd.get_window() == 0)
@@ -614,7 +560,12 @@ namespace reliable_ordered_channel
         }
 
         void set_on_app_data_ready(std::function<void()> f) override { on_app = f; }
-        void set_on_net_data_ready(std::function<void(std::shared_ptr<rudp_protocol_packet>)> f) override { on_net = f; }
+
+        void set_on_net_data_ready(std::function<void(std::shared_ptr<rudp_protocol_packet>)> f) override
+        {
+            on_net = f;
+        }
+
         void set_timer_service(std::shared_ptr<i_timer_service> timer_service) override { global_timer_manager = timer_service; }
 
     private:
@@ -622,7 +573,6 @@ namespace reliable_ordered_channel
         {
             while (true)
             {
-                // Nagle Check
                 uint32_t pending_bytes = snd.max_payload_pending();
                 uint32_t in_flight_cnt = snd.get_in_flight();
 
@@ -630,14 +580,11 @@ namespace reliable_ordered_channel
                       (pending_bytes > 0 && (in_flight_cnt == 0 || pending_bytes == channel_config::MAX_MSS))))
                     break;
 
-                // If only ACKs are needed and no data, create a specific ACK packet
                 if (pending_bytes == 0 && (rcv.need_ack() || to_probe))
                 {
-                    // Create pure ACK/Probe packet
                     auto pkt = std::make_shared<rudp_protocol_packet>(channel_config::TOTAL_HEADER_RESERVE);
                     pkt->set_length(channel_config::TOTAL_HEADER_RESERVE);
 
-                    // Serialize header...
                     channel_header h{};
                     h.seq_no = snd.snd_nxt;
                     fill_ack_info(h);
@@ -647,21 +594,18 @@ namespace reliable_ordered_channel
 
                     char *buf = pkt->get_buffer() + rudp_protocol_packet::CHANNEL_HEADER_OFFSET;
                     packet_codec::serialize_header(buf, h);
-                    on_net(pkt);
 
-                    // Pure ACKs are not retransmitted usually, or handled differently.
-                    // Loop break to avoid infinite loop if logic expects data
+                    if (on_net)
+                        on_net(pkt);
                     break;
                 }
 
                 uint32_t seq = 0;
-                // Get the existing packet pointer from the queue
                 std::shared_ptr<rudp_protocol_packet> pkt = snd.get_next_packet_to_send(seq);
 
                 if (!pkt)
                     break;
 
-                // Write Header into the RESERVED space
                 channel_header h{};
                 h.seq_no = seq;
                 fill_ack_info(h);
@@ -671,7 +615,8 @@ namespace reliable_ordered_channel
                 char *buf = pkt->get_buffer() + rudp_protocol_packet::CHANNEL_HEADER_OFFSET;
                 packet_codec::serialize_header(buf, h);
 
-                on_net(pkt);
+                if (on_net)
+                    on_net(pkt);
                 add_rto_timer(seq, pkt);
             }
         }
@@ -684,7 +629,7 @@ namespace reliable_ordered_channel
                 h.ack_no = rcv.ack_no();
                 uint32_t win_to_send = rcv.window();
                 if (win_to_send < channel_config::MAX_MSS)
-                    win_to_send = 0; // Clark's
+                    win_to_send = 0;
                 h.win_sz = win_to_send;
                 rcv.clear_ack();
             }
