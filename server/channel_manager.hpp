@@ -249,7 +249,12 @@ class channel_manager : public i_server, public i_channel_manager_for_session_co
 
 public:
     channel_manager() = default;
-    ~channel_manager() = default;
+    ~channel_manager()
+    {
+
+        session_control_->on_close_server(); // now nothing should come to me from server, and if application tries to read or write after calling close, its undefined from my side
+        // my things will get remvoed in destructor iteslf
+    }
     // explictly deleting copy/move
     channel_manager(const channel_manager &) = delete;
     channel_manager &operator=(const channel_manager &) = delete;
@@ -290,13 +295,6 @@ public:
         }
     }
 
-    void close_server() override
-    {
-        LOG_INFO("Server close requested by application.");
-        session_control_->on_close_server(); // now nothing should come to me from server, and if application tries to read or write after calling close, its undefined from my side
-        // my things will get remvoed in destructor iteslf
-    }
-
     ssize_t read_from_channel_nonblocking(channel_id &channel_id_, client_id &client_id_, char *buf, const size_t len) override
     {
         LOG_TEST("Non-blocking read initiated.");
@@ -306,6 +304,7 @@ public:
             client_id_ = *disconnected_client;
             channel_id_ = INVALID_CHANNEL_ID;
             LOG_INFO("Non-blocking read returning CLIENT_DISCONNECTED for client " << client_id_);
+            perform_final_cleanup(client_id_);
             return (ssize_t)READ_FROM_CHANNEL_ERROR::CLIENT_DISCONNECTED;
         }
 
@@ -360,6 +359,8 @@ public:
                 client_id_ = *disconnected_client;
                 channel_id_ = INVALID_CHANNEL_ID;
                 LOG_INFO("Non-blocking read returning CLIENT_DISCONNECTED for client " << client_id_);
+                perform_final_cleanup(client_id_);
+
                 return (ssize_t)READ_FROM_CHANNEL_ERROR::CLIENT_DISCONNECTED;
             }
 

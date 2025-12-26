@@ -4,81 +4,62 @@
 #include <atomic>
 #include <thread>
 #include <iomanip>
-#include <algorithm>
 #include "client/client_setup.hpp"
 
-static constexpr size_t GB = 1ull * 1024 * 1024 * 1024;
-static constexpr uint64_t PER_CHANNEL_GOAL = 1ull * 100 * GB;
-static constexpr size_t TOTAL_EXPECTED = PER_CHANNEL_GOAL * 1;
+// Shared flag to stop threads
+std::atomic<bool> keep_sending{true};
 
-// Worker now takes 'buf_size' as a parameter
-void send_worker(std::shared_ptr<i_client> client, channel_id ch, size_t bytes_to_send, size_t buf_size, std::atomic<size_t> &global_sent)
+void send_worker(std::shared_ptr<i_client> client, channel_id ch, size_t buf_size, std::atomic<size_t> &global_sent)
 {
-    // Create a buffer specific to this thread's requirements
-    std::vector<char> buf(buf_size, 'A');
-    uint64_t sent_by_thread = 0;
-
-    while (sent_by_thread < bytes_to_send)
+    // 4KB Chunks to be safe with Slab Allocator
+    std::vector<char> buf(buf_size, 'B'); 
+    
+    while (keep_sending)
     {
-        size_t chunk = std::min(buf_size, bytes_to_send - sent_by_thread);
-        ssize_t n = client->write_to_channel(ch, buf.data(), chunk);
-
-        if (n > 0)
-        {
-            sent_by_thread += n;
-            global_sent.fetch_add(n, std::memory_order_relaxed);
-        }
-        else
-        {
-            // Prevent 100% CPU spin if the OS/Internal buffer is full
-            // std::this_thread::yield();
-
-            std::this_thread::sleep_for(duration_ms(1));
-        }
+        ssize_t n = client->write_to_channel(ch, buf.data(), buf.size());
+        if (n > 0) global_sent.fetch_add(n, std::memory_order_relaxed);
+        else std::this_thread::yield();
     }
-    std::cout << "[Client] Channel " << (int)ch << " (Buf: " << buf_size << " bytes) finished sending 1GB.\n";
 }
 
-int main()
+int main(int argc, char* argv[])
 {
-    auto client = create_client("127.0.0.1", "9000");
+    // READ DURATION FROM ARGUMENT (Default 10s)
+    int TEST_DURATION_SEC = (argc > 1) ? std::atoi(argv[1]) : 10;
 
-    // 1. Setup Channels
+    auto client = create_client("127.0.0.1", "9005");
+
     client->add_channel(1, channel_type::RELIABLE_ORDERED_CHANNEL);
     client->add_channel(2, channel_type::ORDERED_UNRELIABLE_CHANNEL);
     client->add_channel(3, channel_type::UNORDERED_UNRELIABLE_CHANNEL);
 
+    char ping[] = "ping";
+    while(client->write_to_channel(1, ping, 4) <= 0) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
     std::atomic<size_t> total_sent{0};
     auto start_time = std::chrono::steady_clock::now();
 
-    // 2. Start 3 Sender Threads with varying buffer sizes
-    // Channel 1: 16KB (16384 bytes)
-    std::thread t1(send_worker, client, 1, PER_CHANNEL_GOAL, 16 * 1024, std::ref(total_sent));
+    // 4KB Buffers
+    std::thread t1(send_worker, client, 1, 16 * 1024, std::ref(total_sent));
+    std::thread t2(send_worker, client, 2, 32 * 1024, std::ref(total_sent));
+    std::thread t3(send_worker, client, 3, 32 * 1024, std::ref(total_sent));
 
-    // // Channel 2 & 3: 512 Bytes
-    std::thread t2(send_worker, client, 2, PER_CHANNEL_GOAL, 32 * 1024, std::ref(total_sent));
-    std::thread t3(send_worker, client, 3, PER_CHANNEL_GOAL, 32 * 1024, std::ref(total_sent));
+    // Wait for duration
+    std::this_thread::sleep_for(std::chrono::seconds(TEST_DURATION_SEC));
 
-    // 3. Monitor Progress
-    while (total_sent < TOTAL_EXPECTED)
-    {
-        std::this_thread::sleep_for(std::chrono::seconds(1));
-        double progress = (total_sent.load() / (double)TOTAL_EXPECTED) * 100.0;
-        double sent_mb = total_sent.load() / (1024.0 * 1024.0);
-
-        std::cout << "[Client] Total Progress: " << std::fixed << std::setprecision(2)
-                  << progress << "% (" << (int)sent_mb << " MB / 3072 MB)\r" << std::flush;
-    }
-
-    t1.join();
-    // t2.join();
-    // t3.join();
+    keep_sending = false;
+    if (t1.joinable()) t1.join();
+    if (t2.joinable()) t2.join();
+    if (t3.joinable()) t3.join();
 
     auto end_time = std::chrono::steady_clock::now();
     std::chrono::duration<double> diff = end_time - start_time;
+    double final_mb = total_sent.load() / (1024.0 * 1024.0);
 
-    std::cout << "\n\n[Client] ALL CHANNELS FINISHED (3GB Total) in " << diff.count() << "s\n";
-    std::cout << "Aggregate Throughput: " << (TOTAL_EXPECTED / (1024.0 * 1024.0)) / diff.count() << " MB/s\n";
+    // FORMAT FOR SCRIPT PARSING
+    std::cout << "Final Avg Speed: " << (final_mb / diff.count()) << " MB/s" << std::endl;
 
     return 0;
 }

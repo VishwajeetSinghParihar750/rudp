@@ -236,7 +236,10 @@ class channel_manager : public i_client, public i_channel_manager_for_session_co
 
 public:
     channel_manager() = default;
-    ~channel_manager() = default;
+    ~channel_manager()
+    {
+        session_control_->on_close_client();
+    }
     // explictly deleting copy/move
     channel_manager(const channel_manager &) = delete;
     channel_manager &operator=(const channel_manager &) = delete;
@@ -262,12 +265,6 @@ public:
         {
             LOG_WARN("Failed to add channel " << ch_id << ". It is either INVALID_CHANNEL_ID or already exists.");
         }
-    }
-
-    void close_client() override
-    {
-        LOG_INFO("Client closing initiated by application.");
-        session_control_->on_close_client();
     }
 
     ssize_t read_from_channel_nonblocking(channel_id &channel_id_, char *buf, const size_t len) override

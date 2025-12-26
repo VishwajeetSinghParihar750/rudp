@@ -9,7 +9,7 @@ static constexpr size_t BUF_SIZE =8 * 1024 * 1024;
 
 int main()
 {
-    auto server = create_server("9000");
+    auto server = create_server("9005");
 
     // Registering the 3 different channel types
     server->add_channel(1, channel_type::RELIABLE_ORDERED_CHANNEL);

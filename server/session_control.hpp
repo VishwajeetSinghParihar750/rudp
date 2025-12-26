@@ -86,13 +86,14 @@ inline std::string flags_to_string(uint8_t flags)
         s.pop_back();
     return s.empty() ? "None" : s;
 }
-
 class connection_state_machine : public std::enable_shared_from_this<connection_state_machine>
 {
 public:
+    // NEW: Callback type for (OldState, NewState)
+    using StateChangeCallback = std::function<void(CONNECTION_STATE, CONNECTION_STATE)>;
+
     struct fsm_result
     {
-        bool close_connection = false;
         bool stop_data_exchange = false;
     };
 
@@ -102,10 +103,14 @@ public:
         bool to_send = false;
     };
 
-    connection_state_machine(std::function<void(uint8_t)> f, std::shared_ptr<i_timer_service> timer_man)
+    // Modified Constructor: Accepts the callback
+    connection_state_machine(std::function<void(uint8_t)> f,
+                             std::shared_ptr<i_timer_service> timer_man,
+                             StateChangeCallback cb) // <--- Passed here
         : current_state(CONNECTION_STATE::LISTEN),
           on_send_control_packet_to_transport(f),
-          global_timer_manager(timer_man)
+          global_timer_manager(timer_man),
+          on_state_change(cb) // <--- Stored here
     {
         LOG_INFO("[connection_state_machine] FSM created, state: LISTEN");
     }
@@ -166,22 +171,23 @@ public:
 
         if (current_state.load() == CONNECTION_STATE::ESTABLISHED)
         {
-            current_state.store(CONNECTION_STATE::LAST_ACK);
+            // Use helper to trigger callback
+            set_state_nolock(CONNECTION_STATE::LAST_ACK);
             LOG_INFO("[FSM] ESTABLISHED -> LAST_ACK");
 
             last_ack_cb_with_retry();
-            return {false, false};
         }
-        else
+        else if (current_state.load() != CONNECTION_STATE::LAST_ACK)
         {
             LOG_ERROR("[FSM] close() from invalid state, sending RST");
 
             last_response = {get_rst_flag(), true};
             send_response_to_network_without_piggybacking_nolock();
 
-            current_state.store(CONNECTION_STATE::CLOSED);
-            return {true, false};
+            // Use helper to trigger callback
+            set_state_nolock(CONNECTION_STATE::CLOSED);
         }
+        return {false};
     }
 
     fsm_result handle_change(uint8_t rcvd_flags)
@@ -196,7 +202,7 @@ public:
         {
             last_response = {get_rst_flag(), true};
             send_response_to_network_without_piggybacking_nolock();
-            return {false, false};
+            return {false};
         }
 
         if (last_response.to_send)
@@ -204,8 +210,9 @@ public:
 
         if (rcvd_flags & get_rst_flag())
         {
-            current_state.store(CONNECTION_STATE::CLOSED);
-            return {true, true};
+            // Use helper to trigger callback
+            set_state_nolock(CONNECTION_STATE::CLOSED);
+            return {true};
         }
 
         switch (current_state.load())
@@ -213,7 +220,8 @@ public:
         case CONNECTION_STATE::LISTEN:
             if (rcvd_flags == get_syn_flag())
             {
-                current_state.store(CONNECTION_STATE::ESTABLISHED);
+                // Use helper to trigger callback
+                set_state_nolock(CONNECTION_STATE::ESTABLISHED);
                 last_response = {get_ack_flag(), true};
             }
             break;
@@ -221,11 +229,12 @@ public:
         case CONNECTION_STATE::ESTABLISHED:
             if (rcvd_flags == get_fin_flag())
             {
-                current_state.store(CONNECTION_STATE::TIME_WAIT);
+                // Use helper to trigger callback
+                set_state_nolock(CONNECTION_STATE::TIME_WAIT);
                 last_response = {get_ack_flag(), true};
                 send_response_to_network_without_piggybacking_nolock();
                 time_wait_cb_with_retry();
-                return {false, true};
+                return {true};
             }
             else if (rcvd_flags == get_syn_flag())
             {
@@ -244,8 +253,9 @@ public:
         case CONNECTION_STATE::LAST_ACK:
             if (rcvd_flags == get_ack_flag())
             {
-                current_state.store(CONNECTION_STATE::CLOSED);
-                return {true, false};
+                // Use helper to trigger callback
+                set_state_nolock(CONNECTION_STATE::CLOSED);
+                return {false};
             }
             break;
 
@@ -253,7 +263,7 @@ public:
             break;
         }
 
-        return {false, false};
+        return {false};
     }
 
 private:
@@ -263,6 +273,7 @@ private:
     std::atomic<CONNECTION_STATE> current_state;
     std::function<void(uint8_t)> on_send_control_packet_to_transport;
     std::shared_ptr<i_timer_service> global_timer_manager;
+    StateChangeCallback on_state_change; // <--- The Callback
 
     to_send_response last_response;
     TimerInfoTimePoint last_ack_send_time;
@@ -275,6 +286,19 @@ private:
     uint8_t get_rst_flag() const { return uint8_t(CONTROL_PACKET_HEADER_FLAGS::RST); }
     uint8_t get_fin_flag() const { return uint8_t(CONTROL_PACKET_HEADER_FLAGS::FIN); }
     uint8_t get_syn_flag() const { return uint8_t(CONTROL_PACKET_HEADER_FLAGS::SYN); }
+
+    // <--- CENTRALIZED STATE CHANGE HELPER
+    void set_state_nolock(CONNECTION_STATE new_state)
+    {
+        CONNECTION_STATE old_state = current_state.load();
+        if (old_state != new_state)
+        {
+            current_state.store(new_state);
+            // Fire callback (still holding lock)
+            if (on_state_change)
+                on_state_change(old_state, new_state);
+        }
+    }
 
     void set_last_ack_sent_time_nolock()
     {
@@ -324,13 +348,14 @@ private:
         }
         else
         {
-            LOG_WARN("[FSM] LAST_ACK retries exhausted");
+            LOG_WARN("[FSM] LAST_ACK retries exhausted. Forcing CLOSED.");
+            // Important: This triggers the callback so Session Control stops waiting
+            set_state_nolock(CONNECTION_STATE::CLOSED);
         }
     }
 
     void time_wait_cb_with_retry(int retries_left = 5)
     {
-        // Mutex is already locked by caller (handle_change) or timer callback
         auto time_spent = std::chrono::duration_cast<duration_ms>(
             std::chrono::steady_clock::now() - last_ack_send_time);
 
@@ -351,8 +376,9 @@ private:
         }
         else
         {
-            current_state.store(CONNECTION_STATE::CLOSED);
             LOG_INFO("[FSM] TIME_WAIT -> CLOSED (2*RTT elapsed)");
+            // Use helper to trigger callback
+            set_state_nolock(CONNECTION_STATE::CLOSED);
         }
     }
 };
@@ -484,7 +510,7 @@ class session_control : public i_session_control_for_udp, public i_session_contr
 
             connection_state_machine::fsm_result res = fsm_opt.value()->handle_change(control_flags);
 
-            if (res.close_connection)
+            if (fsm_opt.value()->get_current_state() == CONNECTION_STATE::CLOSED)
             {
                 LOG_WARN("Session Control: FSM immediately closed connection for new client.");
                 teardown_counter.erase(cl_id);
@@ -518,9 +544,6 @@ class session_control : public i_session_control_for_udp, public i_session_contr
 
             connection_state_machine::fsm_result res = fsm_opt.value()->handle_change(control_flags);
 
-            if (res.close_connection)
-                trigger_teardown_step(cl_id);
-
             if (res.stop_data_exchange)
             {
                 if (auto sp = channel_manager_ptr.lock())
@@ -534,8 +557,9 @@ class session_control : public i_session_control_for_udp, public i_session_contr
 
     void create_fsm_for_client(const client_id &cl_id, const transport_addr &source_addr)
     {
-        clients_fsm.insert(cl_id, std::make_shared<connection_state_machine>([source_addr, cl_id, this](uint8_t fsm_flags)
-                                                                             {
+        clients_fsm.insert(cl_id, std::make_shared<connection_state_machine>(
+                                      [source_addr, cl_id, this](uint8_t fsm_flags)
+                                      {
             char buf[rudp_protocol_packet::SESSION_CONTROL_HEADER_SIZE] = {0};
             uint32_t net_reserved = htonl(0);
             
@@ -543,7 +567,13 @@ class session_control : public i_session_control_for_udp, public i_session_contr
             memcpy(buf + sizeof(fsm_flags), &net_reserved, sizeof(net_reserved)); 
             
             LOG_INFO("Control Packet Send: Client " << cl_id << ", Flags: " << flags_to_string(fsm_flags));
-            this->udp_ptr->send_packet_to_network(source_addr, buf, sizeof(buf)); }, global_timer_manager));
+            this->udp_ptr->send_packet_to_network(source_addr, buf, sizeof(buf)); },
+
+                                      global_timer_manager,
+
+                                      [this, cl_id](CONNECTION_STATE old_state, CONNECTION_STATE new_state)
+                                      {
+                if(old_state != CONNECTION_STATE::CLOSED && new_state == CONNECTION_STATE::CLOSED) trigger_teardown_step(cl_id); }));
     }
 
 public:
@@ -591,37 +621,16 @@ public:
         {
             client_id cl_id = p.first;
             auto fsm = p.second;
+            trigger_teardown_step(cl_id);
             connection_state_machine::fsm_result res = fsm->close();
-            if (res.close_connection)
-            {
-                to_clean_up.push_back(cl_id);
-                LOG_INFO("Session Control: Client " << cl_id << " FSM closed immediately.");
-            }
-            else
-            {
-                trigger_teardown_step(cl_id);
-                LOG_INFO("Session Control: Client " << cl_id << " starting graceful teardown.");
-            }
         }
-        for (auto i : to_clean_up)
-            perform_final_cleanup(i);
 
-        if (clients_fsm.size() > 0)
+        while (clients_fsm.size() > 0)
         {
-            LOG_INFO("Session Control: Waiting for graceful FSM closures. Starting poll timer.");
-            auto this_shared_ptr = shared_from_this();
-            std::function<void()> cb = [this_shared_ptr, cb]
-            {
-                if (this_shared_ptr->clients_fsm.size() > 0)
-                {
-                    this_shared_ptr->global_timer_manager->add_timer(std::make_shared<timer_info>(duration_ms(100), cb));
-                }
-                else
-                {
-                    LOG_CRITICAL("Session Control: All client FSMs gracefully closed.");
-                }
-            };
-            global_timer_manager->add_timer(std::make_shared<timer_info>(duration_ms(100), cb));
+            LOG_INFO("Session Control: Waiting for " << clients_fsm.size() << " clients to disconnect...");
+
+            int interval_ms = 100;
+            std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms));
         }
     }
 
