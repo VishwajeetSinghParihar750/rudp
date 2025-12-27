@@ -1,6 +1,6 @@
-# HELIOS — Multi-Channel QUIC-Inspired Reliable UDP Transport (C++)
+# RUDP — Multi-Channel QUIC-Inspired Reliable UDP Transport (C++)
 
-HELIOS is a high-performance, user-space transport protocol built on top of UDP.
+RUDP is a high-performance, user-space transport protocol built on top of UDP.
 It provides reliability, ordering, and multiplexing **without head-of-line blocking**, targeting low-latency C++ systems.
 
 The design is inspired by QUIC’s multi-stream model and TCP’s reliability mechanisms, while remaining minimal, explicit, and debuggable.
@@ -13,18 +13,18 @@ The design is inspired by QUIC’s multi-stream model and TCP’s reliability me
 **Baseline:** TCP  
 **Network simulation:** tc netem
 
-| Scenario | TCP Speed (MB/s) | HELIOS Speed (MB/s) | Winner |
+| Scenario | TCP Speed (MB/s) | RUDP Speed (MB/s) | Winner |
 |--------|------------------|---------------------|--------|
 | Ideal Localhost | 2747.88 | 1236.31 | TCP |
-| Spotty WiFi (1% loss) | 716.35 | 902.59 | HELIOS |
-| Cross Country (50ms RTT) | 44.93 | 402.28 | HELIOS |
-| Congestion (5% loss) | 54.25 | 1171.66 | HELIOS |
-| Loss + Latency | 8.09 | 387.53 | HELIOS |
+| Spotty WiFi (1% loss) | 716.35 | 902.59 | RUDP |
+| Cross Country (50ms RTT) | 44.93 | 402.28 | RUDP |
+| Congestion (5% loss) | 54.25 | 1171.66 | RUDP |
+| Loss + Latency | 8.09 | 387.53 | RUDP |
 
 ### Observation
 
 - TCP performs best on ideal networks.
-- HELIOS significantly outperforms TCP under packet loss, latency, and congestion.
+- RUDP significantly outperforms TCP under packet loss, latency, and congestion.
 
 ---
 
@@ -39,7 +39,7 @@ UDP:
 - Low latency
 - No reliability, ordering, or flow control
 
-HELIOS implements a **user-space transport layer** that supports multiple independent channels with configurable delivery semantics.
+RUDP implements a **user-space transport layer** that supports multiple independent channels with configurable delivery semantics.
 
 ---
 
@@ -84,7 +84,7 @@ sequenceDiagram
         participant App as Application
     end
 
-    box "Helios Logic Layer" #e1f5fe
+    box "RUDP Logic Layer" #e1f5fe
         participant ChanMgr as Channel Manager
         participant Chan as Channel
         participant Q as Ready Queue
