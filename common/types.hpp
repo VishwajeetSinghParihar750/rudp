@@ -17,7 +17,6 @@ enum class channel_type : uint16_t
     RELIABLE_ORDERED_CHANNEL = 0,
     ORDERED_UNRELIABLE_CHANNEL = 1,
     UNORDERED_UNRELIABLE_CHANNEL = 2,
-    RELIABLE_UNORDERED_CHANNEL = 3,
 };
 
 static std::mt19937_64 &get_rng()

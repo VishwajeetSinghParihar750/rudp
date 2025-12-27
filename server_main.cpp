@@ -5,7 +5,7 @@
 #include <map>
 #include "server/server_setup.hpp"
 
-static constexpr size_t BUF_SIZE =8 * 1024 * 1024;
+static constexpr size_t BUF_SIZE = 8 * 1024 * 1024;
 
 int main()
 {
@@ -16,14 +16,14 @@ int main()
     server->add_channel(2, channel_type::ORDERED_UNRELIABLE_CHANNEL);
     server->add_channel(3, channel_type::UNORDERED_UNRELIABLE_CHANNEL);
 
-    std::cout << "[Server] Listening on port 9000 (3 Channels Active)\n";
+    std::cout << "[Server] Listening on port 9005 (3 Channels Active)\n";
 
     std::vector<char> buf(BUF_SIZE);
 
     // Stats tracking
     std::map<channel_id, size_t> total_per_channel;
     std::map<channel_id, size_t> bytes_this_sec_per_channel;
-    size_t grand_total = 0;
+    size_t grand_total_bytes = 0;
 
     auto last_tick = std::chrono::steady_clock::now();
 
@@ -39,7 +39,7 @@ int main()
         {
             total_per_channel[ch] += n;
             bytes_this_sec_per_channel[ch] += n;
-            grand_total += n;
+            grand_total_bytes += n;
         }
 
         auto now = std::chrono::steady_clock::now();
@@ -47,11 +47,15 @@ int main()
         {
             std::cout << "\n--- [Server Stats] ---\n";
 
+            double total_mb_this_sec = 0.0;
+
             for (int i = 1; i <= 3; ++i)
             {
                 channel_id id = static_cast<channel_id>(i);
                 double mbps = bytes_this_sec_per_channel[id] / (1024.0 * 1024.0);
                 double total_mb = total_per_channel[id] / (1024.0 * 1024.0);
+                
+                total_mb_this_sec += mbps;
 
                 std::cout << "Channel " << i << ": "
                           << std::fixed << std::setprecision(2) << mbps << " MB/s "
@@ -61,7 +65,9 @@ int main()
                 bytes_this_sec_per_channel[id] = 0;
             }
 
-            std::cout << "Grand Total: " << (grand_total / (1024.0 * 1024.0)) << " MB\n";
+            // CRITICAL FOR BENCHMARK PARSER:
+            std::cout << "SPEED: " << total_mb_this_sec << " MB/s" << std::endl;
+            std::cout << "Grand Total: " << (grand_total_bytes / (1024.0 * 1024.0)) << " MB\n";
             std::cout << "----------------------\n";
 
             last_tick = now;

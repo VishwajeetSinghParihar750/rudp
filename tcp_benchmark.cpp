@@ -1,5 +1,5 @@
 /* tcp_benchmark.cpp 
-   Compile: g++ -o tcp_benchmark tcp_benchmark.cpp -O3
+   Compile: g++ -o tcp_benchmark tcp_benchmark.cpp -O3 -pthread
 */
 
 #include <iostream>
@@ -35,13 +35,11 @@ void run_server() {
     int opt = 1;
     int addrlen = sizeof(address);
 
-    // Create socket
     if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
         perror("Socket failed");
         exit(EXIT_FAILURE);
     }
 
-    // FORCE reuse address/port (Fixes "Address already in use")
     if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt))) {
         perror("setsockopt");
         exit(EXIT_FAILURE);
@@ -68,7 +66,6 @@ void run_server() {
         exit(EXIT_FAILURE);
     }
 
-    // Benchmark Loop
     char buffer[BUFFER_SIZE];
     long long total_bytes = 0;
     auto start_time = high_resolution_clock::now();
@@ -76,22 +73,25 @@ void run_server() {
 
     while (keep_running) {
         int valread = read(new_socket, buffer, BUFFER_SIZE);
-        if (valread <= 0) break; // EOF or Error
+        if (valread <= 0) break; 
 
         if (first_packet) {
             start_time = high_resolution_clock::now();
             first_packet = false;
         }
         total_bytes += valread;
+        
+        // Print speed periodically for parser compatibility
+        static auto last_print = high_resolution_clock::now();
+        auto now = high_resolution_clock::now();
+        if (duration_cast<seconds>(now - last_print).count() >= 1) {
+             duration<double> elapsed = now - start_time;
+             double mb_s = (total_bytes / (1024.0 * 1024.0)) / elapsed.count();
+             cout << "SPEED: " << mb_s << " MB/s" << endl;
+             last_print = now;
+        }
     }
-
-    auto end_time = high_resolution_clock::now();
-    duration<double> elapsed = end_time - start_time;
-    double mb_s = (total_bytes / (1024.0 * 1024.0)) / elapsed.count();
-
-    cout << "[TCP-Server] Received " << total_bytes << " bytes in " << elapsed.count() << "s." << endl;
-    cout << "SPEED: " << mb_s << " MB/s" << endl;
-
+    
     close(new_socket);
     close(server_fd);
 }
@@ -103,7 +103,7 @@ void run_client(const char* ip, int duration_sec) {
     int sock = 0;
     struct sockaddr_in serv_addr;
     char buffer[BUFFER_SIZE];
-    memset(buffer, 'A', BUFFER_SIZE); // Fill garbage data
+    memset(buffer, 'A', BUFFER_SIZE); 
 
     if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
         perror("Socket creation error");
@@ -118,7 +118,6 @@ void run_client(const char* ip, int duration_sec) {
         return;
     }
 
-    // RETRY LOGIC (Fixes "FATAL: Could not connect")
     bool connected = false;
     for (int i = 0; i < 5; i++) {
         if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) >= 0) {
@@ -130,7 +129,7 @@ void run_client(const char* ip, int duration_sec) {
     }
 
     if (!connected) {
-        cerr << "FATAL: Could not connect to TCP server after retries." << endl;
+        cerr << "FATAL: Could not connect to TCP server." << endl;
         return;
     }
 
@@ -145,7 +144,6 @@ void run_client(const char* ip, int duration_sec) {
         if (elapsed.count() >= duration_sec) break;
     }
 
-    // Clean shutdown
     shutdown(sock, SHUT_WR); 
     close(sock);
     cout << "[TCP-Client] Done." << endl;
@@ -153,14 +151,9 @@ void run_client(const char* ip, int duration_sec) {
 
 int main(int argc, char const *argv[]) {
     signal(SIGINT, signal_handler);
-
-    if (argc < 2) {
-        cout << "Usage: ./tcp_benchmark [server|client] [ip (client only)] [duration (client only)]" << endl;
-        return 1;
-    }
+    if (argc < 2) return 1;
 
     string mode = argv[1];
-
     if (mode == "server") {
         run_server();
     } else if (mode == "client") {
@@ -168,6 +161,5 @@ int main(int argc, char const *argv[]) {
         int duration = (argc >= 4) ? stoi(argv[3]) : 10;
         run_client(ip, duration);
     }
-
     return 0;
 }
